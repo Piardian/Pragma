@@ -178,6 +178,10 @@ def run_pipeline(
             "take_profits": list(poi.take_profits),
             "intersects_last_closed_m1": bool(intersects),
         })
+        if hasattr(notifier_instance, "notify_poi"):
+            notifications.append(notifier_instance.notify_poi(
+                symbol, poi, regime_decision.regime, last_bar_time
+            ))
         if not intersects:
             continue
         decision = evaluate_trigger(

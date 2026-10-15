@@ -45,7 +45,7 @@ class RegimePOITests(unittest.TestCase):
         self.assertEqual(result.regime, MarketRegime.IMBALANCE_BULL)
         poi = next(p for p in result.pois if p.poi_type == "LONG_TREND_PULLBACK")
         self.assertAlmostEqual(poi.center, 101.0)
-        self.assertAlmostEqual(poi.take_profit, 104.0)
+        self.assertAlmostEqual(poi.take_profit, 103.5)
 
     def test_balance_short_mean_reversion_poi(self):
         result = generate_regime_pois(-1, self.profile, self.vwap(), 100.0, 2.0)
@@ -57,7 +57,51 @@ class RegimePOITests(unittest.TestCase):
         self.assertEqual(result.regime, MarketRegime.IMBALANCE_BEAR)
         poi = next(p for p in result.pois if p.poi_type == "SHORT_TREND_PULLBACK")
         self.assertAlmostEqual(poi.center, 99.0)
-        self.assertAlmostEqual(poi.take_profit, 96.0)
+        self.assertAlmostEqual(poi.take_profit, 96.5)
+
+    def test_bear_imbalance_locks_all_long_pois(self):
+        result = generate_regime_pois(
+            1, self.profile, self.vwap(value=98.0), 97.0, 2.0
+        )
+        self.assertEqual(result.regime, MarketRegime.IMBALANCE_BEAR)
+        self.assertFalse(any(p.direction == "LONG" for p in result.pois))
+
+    def test_bull_imbalance_locks_all_short_pois(self):
+        result = generate_regime_pois(
+            -1, self.profile, self.vwap(value=102.0), 103.0, 2.0
+        )
+        self.assertEqual(result.regime, MarketRegime.IMBALANCE_BULL)
+        self.assertFalse(any(p.direction == "SHORT" for p in result.pois))
+
+    def test_balance_long_mean_reversion_requires_vwap_at_or_above_val(self):
+        result = generate_regime_pois(
+            1, self.profile, self.vwap(value=98.5), 101.5, 2.0
+        )
+        self.assertEqual(result.regime, MarketRegime.BALANCE)
+        self.assertFalse(any(p.poi_type == "LONG_MEAN_REVERSION" for p in result.pois))
+
+    def test_balance_short_mean_reversion_requires_vwap_at_or_below_vah(self):
+        result = generate_regime_pois(
+            -1, self.profile, self.vwap(value=101.5), 98.5, 2.0
+        )
+        self.assertEqual(result.regime, MarketRegime.BALANCE)
+        self.assertFalse(any(p.poi_type == "SHORT_MEAN_REVERSION" for p in result.pois))
+
+    def test_bull_pullback_can_center_on_active_vwap_or_lower_band(self):
+        result = generate_regime_pois(
+            1, self.profile, self.vwap(value=103.0), 102.2, 2.0
+        )
+        pullbacks = [p for p in result.pois if p.poi_type == "LONG_TREND_PULLBACK"]
+        self.assertTrue(any(abs(p.center - 102.0) < 1e-9 for p in pullbacks))
+        self.assertTrue(all(p.take_profits == (103.5, 105.5) for p in pullbacks))
+
+    def test_bear_pullback_can_center_on_active_vwap_or_upper_band(self):
+        result = generate_regime_pois(
+            -1, self.profile, self.vwap(value=97.0), 97.8, 2.0
+        )
+        pullbacks = [p for p in result.pois if p.poi_type == "SHORT_TREND_PULLBACK"]
+        self.assertTrue(any(abs(p.center - 98.0) < 1e-9 for p in pullbacks))
+        self.assertTrue(all(p.take_profits == (96.5, 94.5) for p in pullbacks))
 
     def test_neutral_macro_never_generates_poi(self):
         result = generate_regime_pois(0, self.profile, self.vwap(), 100.0, 2.0)
@@ -164,6 +208,56 @@ class TriggerTests(unittest.TestCase):
         self.assertTrue(result.metrics["target_fallback_to_tp2"])
         self.assertEqual(result.take_profit_1, 110.0)
         self.assertGreaterEqual(result.rr_ratio, 1.5)
+
+    def test_long_mean_reversion_requires_level_reclaim(self):
+        bars = self.bars("LONG")
+        result = evaluate_trigger(
+            bars, "LONG", 98.0, 102.0, atr_14=2.0, take_profit=110.0,
+            poi_type="LONG_MEAN_REVERSION", center_price=100.0,
+        )
+        self.assertFalse(result.execute)
+        self.assertEqual(result.reason, "LEVEL_RECLAIM_NOT_CONFIRMED")
+        self.assertFalse(result.metrics["level_reclaim"])
+
+    def test_long_mean_reversion_accepts_reclaimed_level(self):
+        bars = self.bars("LONG")
+        bars.iloc[-1, bars.columns.get_loc("open")] = 100.0
+        bars.iloc[-1, bars.columns.get_loc("close")] = 100.2
+        bars.iloc[-1, bars.columns.get_loc("high")] = 100.4
+        bars.iloc[-1, bars.columns.get_loc("low")] = 99.8
+        result = evaluate_trigger(
+            bars, "LONG", 98.0, 102.0, atr_14=2.0, take_profit=110.0,
+            poi_type="LONG_MEAN_REVERSION", center_price=100.0,
+        )
+        self.assertTrue(result.metrics["level_reclaim"])
+
+    def test_short_mean_reversion_requires_level_reclaim(self):
+        bars = self.bars("SHORT")
+        result = evaluate_trigger(
+            bars, "SHORT", 98.0, 102.0, atr_14=2.0, take_profit=90.0,
+            poi_type="SHORT_MEAN_REVERSION", center_price=100.0,
+        )
+        self.assertFalse(result.execute)
+        self.assertEqual(result.reason, "LEVEL_RECLAIM_NOT_CONFIRMED")
+        self.assertFalse(result.metrics["level_reclaim"])
+
+    def test_split_targets_accept_rr1_at_least_1_and_rr2_at_least_1_8(self):
+        result = evaluate_trigger(
+            self.bars("LONG"), "LONG", 98.0, 102.0, atr_14=2.0,
+            take_profit=[103.2, 105.5],
+        )
+        self.assertTrue(result.execute, result.reason)
+        self.assertTrue(result.metrics["split_rr_gate"])
+        self.assertAlmostEqual(result.take_profit_1, 103.2)
+        self.assertAlmostEqual(result.take_profit_2, 105.5)
+
+    def test_split_targets_reject_when_rr2_below_1_8_and_tp1_below_min_rr(self):
+        result = evaluate_trigger(
+            self.bars("LONG"), "LONG", 98.0, 102.0, atr_14=2.0,
+            take_profit=[103.2, 104.5],
+        )
+        self.assertFalse(result.execute)
+        self.assertEqual(result.reason, "LOW_RR")
 
     def test_vwap_engine_produces_1p5_sigma_bands(self):
         bars = pd.DataFrame({"high": [11.0, 12.0, 13.0],

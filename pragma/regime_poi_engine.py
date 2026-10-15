@@ -31,13 +31,18 @@ class POI:
         return self.take_profits[0]
 
 
+# Explicit interface name used by the orchestration layer; POI remains an alias
+# for compatibility with earlier callers.
+POIZone = POI
+
+
 @dataclass(frozen=True)
 class RegimePOIDecision:
     regime: MarketRegime
     macro_bias: int
     current_price: float
     atr_14: float
-    pois: tuple[POI, ...]
+    pois: tuple[POIZone, ...]
     reason: str
 
 
@@ -77,13 +82,8 @@ def _pair_if_confluent(a_name: str, a: float, b_name: str, b: float,
 
 
 def _level_vs_band_range(
-    level_name: str,
-    level: float,
-    band_low_name: str,
-    band_low: float,
-    band_high_name: str,
-    band_high: float,
-    tolerance: float,
+    level_name: str, level: float, band_low_name: str, band_low: float,
+    band_high_name: str, band_high: float, tolerance: float,
 ) -> tuple[float, tuple[str, str]] | None:
     """Match a level to a band interval, including ATR tolerance outside it."""
     low, high = sorted((band_low, band_high))
@@ -91,8 +91,6 @@ def _level_vs_band_range(
     if abs(level - nearest) > tolerance:
         return None
     if low <= level <= high:
-        # The structural level lies inside the VWAP band range; the overlap's
-        # center is that level itself (the intersection has zero width).
         band_name = f"{band_low_name}..{band_high_name}"
     elif nearest == low:
         band_name = band_low_name
@@ -121,11 +119,8 @@ def classify_regime(current_price: float, previous_profile: Any,
 
 
 def generate_regime_pois(
-    macro_bias: int,
-    previous_profile: Any,
-    vwap: Any,
-    current_price: float,
-    atr_14: float,
+    macro_bias: int, previous_profile: Any, vwap: Any,
+    current_price: float, atr_14: float,
 ) -> RegimePOIDecision:
     """Classify regime and generate only spec-defined directional POIs.
 
@@ -137,8 +132,7 @@ def generate_regime_pois(
     """
     if macro_bias not in (-1, 0, 1):
         raise ValueError("macro_bias must be -1, 0, or +1")
-    price = _finite(current_price, "current_price")
-    atr = _finite(atr_14, "atr_14")
+    price, atr = _finite(current_price, "current_price"), _finite(atr_14, "atr_14")
     if atr <= 0:
         raise ValueError("atr_14 must be greater than zero")
     poc = _finite(_get(previous_profile, "pdPOC", "pd_poc"), "pdPOC")
@@ -166,34 +160,28 @@ def generate_regime_pois(
     upper_1_5 = band("vwap_upper_1p5sigma", vwap_value + 1.5 * sigma)
     lower_2_5 = band("vwap_lower_2p5sigma", vwap_value - 2.5 * sigma)
     upper_2_5 = band("vwap_upper_2p5sigma", vwap_value + 2.5 * sigma)
-
     regime = classify_regime(price, previous_profile, {"vwap": vwap_value})
     if macro_bias == 0:
         return RegimePOIDecision(regime, macro_bias, price, atr, (), "NEUTRAL_MACRO")
 
-    tolerance = 0.5 * atr
-    half_width = 0.25 * atr
-    pois: list[POI] = []
+    tolerance, half_width = 0.5 * atr, 0.25 * atr
+    pois: list[POIZone] = []
 
     def add(direction: str, poi_type: str, center: float,
             targets: tuple[float, ...], sources: tuple[str, ...]) -> None:
-        pois.append(POI(
-            direction=direction, poi_type=poi_type, regime=regime,
-            center=center, poi_low=center - half_width,
-            poi_high=center + half_width, take_profits=targets,
-            source_levels=sources,
-        ))
+        pois.append(POIZone(direction, poi_type, regime, center,
+                            center - half_width, center + half_width,
+                            targets, sources))
 
     lvns = _get(previous_profile, "pdLVN", "pd_lvn", default=()) or ()
     if macro_bias == 1 and regime == MarketRegime.BALANCE:
-        below_lvn = _nearest_lvn(lvns, val, "below")
         candidates = [("pdVAL", val)]
-        if below_lvn is not None:
-            candidates.append(("pdLVN", below_lvn))
+        nearest_lvn = _nearest_lvn(lvns, val, "below")
+        if nearest_lvn is not None:
+            candidates.append(("pdLVN", nearest_lvn))
         for level_name, level in candidates:
-            match = _level_vs_band_range(level_name, level,
-                                         "lower_2p5sigma", lower_2_5,
-                                         "lower_1p5sigma", lower_1_5,
+            match = _level_vs_band_range(level_name, level, "lower_2p5sigma",
+                                         lower_2_5, "lower_1p5sigma", lower_1_5,
                                          tolerance)
             if match:
                 add("LONG", "LONG_MEAN_REVERSION", match[0], (poc, vwap_value), match[1])
@@ -203,14 +191,13 @@ def generate_regime_pois(
             if match:
                 add("LONG", "LONG_TREND_PULLBACK", match[0], (upper_2,), match[1])
     elif macro_bias == -1 and regime == MarketRegime.BALANCE:
-        above_lvn = _nearest_lvn(lvns, vah, "above")
         candidates = [("pdVAH", vah)]
-        if above_lvn is not None:
-            candidates.append(("pdLVN", above_lvn))
+        nearest_lvn = _nearest_lvn(lvns, vah, "above")
+        if nearest_lvn is not None:
+            candidates.append(("pdLVN", nearest_lvn))
         for level_name, level in candidates:
-            match = _level_vs_band_range(level_name, level,
-                                         "upper_1p5sigma", upper_1_5,
-                                         "upper_2p5sigma", upper_2_5,
+            match = _level_vs_band_range(level_name, level, "upper_1p5sigma",
+                                         upper_1_5, "upper_2p5sigma", upper_2_5,
                                          tolerance)
             if match:
                 add("SHORT", "SHORT_MEAN_REVERSION", match[0], (poc, vwap_value), match[1])
@@ -220,7 +207,7 @@ def generate_regime_pois(
             if match:
                 add("SHORT", "SHORT_TREND_PULLBACK", match[0], (lower_2,), match[1])
 
-    unique: list[POI] = []
+    unique: list[POIZone] = []
     seen: set[tuple[str, str, float]] = set()
     for poi in pois:
         key = (poi.direction, poi.poi_type, round(poi.center, 12))

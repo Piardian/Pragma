@@ -46,6 +46,7 @@ class BegonyaMacroGateTests(unittest.TestCase):
             result = MacroGate(path, max_age_hours=36).get_bias("XAUUSD")
             self.assertEqual(result.bias, Bias.NEUTRAL)
             self.assertEqual(result.source, "begonya_stale")
+            self.assertEqual(result.gate, "UNMAPPED")
 
     def test_missing_symbol_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:

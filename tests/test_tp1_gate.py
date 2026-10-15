@@ -7,7 +7,7 @@ from pragma.trigger_engine import evaluate_trigger
 
 
 class TP1RiskGateTests(unittest.TestCase):
-    def test_far_tp2_cannot_rescue_low_tp1_rr(self):
+    def test_far_tp2_becomes_primary_target_when_tp1_rr_is_low(self):
         close = 100.0 + 0.25 * np.sin(np.arange(30) * 1.3)
         close[-2] = 90.0
         close[-1] = 99.8
@@ -28,12 +28,12 @@ class TP1RiskGateTests(unittest.TestCase):
             bars, "LONG", 98.0, 102.0, atr_14=2.0,
             take_profit=[100.5, 110.0],
         )
-        self.assertEqual(result.take_profit_1, 100.5)
+        self.assertEqual(result.take_profit_1, 110.0)
         self.assertEqual(result.take_profit_2, 110.0)
         self.assertEqual(result.take_profit, result.take_profit_1)
-        self.assertLess(result.rr_ratio, 1.5)
-        self.assertFalse(result.execute)
-        self.assertEqual(result.reason, "LOW_RR")
+        self.assertGreaterEqual(result.rr_ratio, 1.5)
+        self.assertTrue(result.metrics["target_fallback_to_tp2"])
+        self.assertTrue(result.execute, result.reason)
 
 
 if __name__ == "__main__":

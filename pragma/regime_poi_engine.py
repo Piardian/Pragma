@@ -183,7 +183,7 @@ def generate_regime_pois(
                             targets, sources))
 
     lvns = _get(previous_profile, "pdLVN", "pd_lvn", default=()) or ()
-    if (macro_bias == 1 or (macro_bias == 0 and allow_range)) and balance_window
+    if (macro_bias == 1 or (macro_bias == 0 and allow_range)) and balance_window:
         candidates = [("pdVAL", val)]
         nearest_lvn = _nearest_lvn(lvns, val, "below")
         if nearest_lvn is not None:
@@ -201,7 +201,7 @@ def generate_regime_pois(
             match = _pair_if_confluent("pdVAH", vah, name, level, tolerance)
             if match:
                 add("LONG", "LONG_TREND_PULLBACK", match[0], (upper_2,), match[1])
-    if (macro_bias == -1 or (macro_bias == 0 and allow_range)) and balance_window
+    if (macro_bias == -1 or (macro_bias == 0 and allow_range)) and balance_window:
         candidates = [("pdVAH", vah)]
         nearest_lvn = _nearest_lvn(lvns, vah, "above")
         if nearest_lvn is not None:
@@ -222,7 +222,7 @@ def generate_regime_pois(
 
     # NEUTRAL_RANGE means range-only permission: allow both edges in balance,
     # but never allow trend-pullback POIs without a directional macro gate.
-    if macro_bias == 0 and allow_range and balance_window
+    if macro_bias == 0 and allow_range and balance_window:
         candidates = [("pdVAH", vah)]
         nearest_lvn = _nearest_lvn(lvns, vah, "above")
         if nearest_lvn is not None:

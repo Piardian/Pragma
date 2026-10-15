@@ -37,7 +37,10 @@ By default, Pragma reads the latest published gate from:
 Override the file location with `BEGONYA_MACRO_GATE_PATH`. The reader prefers
 `execution_bias_gates` and falls back to the deterministic gate mappings.
 Gate files older than 36 hours fail closed to neutral; configure the threshold
-with `BEGONYA_MACRO_MAX_AGE_HOURS`.
+with `BEGONYA_MACRO_MAX_AGE_HOURS`. Begonya's current timestamps omit a
+timezone, so Pragma interprets naive timestamps as `Europe/Istanbul`; override
+this with `BEGONYA_MACRO_TIMEZONE` if Begonya is configured to emit local time
+in a different timezone. Explicit timezone offsets in the JSON are respected.
 
 - `LONG_ONLY` maps to long bias.
 - `SHORT_ONLY` maps to short bias.

@@ -111,6 +111,10 @@ class TriggerTests(unittest.TestCase):
             open_[-1] = close[-1] + 0.10
             high[-1] = close[-1] + 0.20
             low[-1] = close[-1] - 0.20
+        # The climax candle must itself intersect the active POI, even though
+        # its close is the exhaustion extreme used by the Z-score rule.
+        high[-2] = 102.1
+        low[-2] = 97.9
         volume = np.full(30, 10.0)
         volume[-2] = 100.0
         return pd.DataFrame({"open": open_, "high": high, "low": low,

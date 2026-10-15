@@ -324,13 +324,13 @@ def run_backtest(
     m1 = m1.copy()
     m1["session"] = m1.index.strftime("%Y-%m-%d")
     session_names = list(dict.fromkeys(m1["session"].tolist()))
-    if len(session_names) < 2:
-        raise ValueError("At least two observed UTC sessions are required")
-    session_positions = {name: i for i, name in enumerate(session_names)}
-    # Profiles are computed once from completed prior sessions, never from the
-    # active session or any future session.
+    if len(session_names) < 3:
+        raise ValueError("At least three observed UTC sessions are required to avoid using the initial partial session as a profile")
+    # The first observed session may be truncated by the history-download
+    # boundary. Skip it as a profile source; begin trading on session 3 using
+    # the fully observed session 2 profile.
     prior_profiles: dict[str, dict[str, Any]] = {}
-    for position in range(1, len(session_names)):
+    for position in range(2, len(session_names)):
         current_name = session_names[position]
         previous_name = session_names[position - 1]
         prior_profiles[current_name] = _profile_levels(
@@ -346,7 +346,6 @@ def run_backtest(
     cost = float(spread_points) * float(point_size)
     trades: list[BacktestTrade] = []
     position: _OpenTrade | None = None
-    m15_indices = m15.index
     processed = 0
 
     for i in range(len(m1)):

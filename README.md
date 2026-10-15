@@ -41,9 +41,8 @@ with `BEGONYA_MACRO_MAX_AGE_HOURS`.
 
 - `LONG_ONLY` maps to long bias.
 - `SHORT_ONLY` maps to short bias.
-- `NEUTRAL_RANGE` maps to neutral bias. In the current Pragma POI engine,
-  neutral bias does not generate POIs, so range-only setups require a separate
-  follow-up implementation.
+- `NEUTRAL_RANGE` permits only balance-regime mean-reversion POIs; it does
+  not permit trend-pullback POIs.
 - A missing, stale, malformed, or unmapped gate never defaults to long or short.
 
 Pragma reads Begonya's output artifact; it does not start Begonya's macro engine

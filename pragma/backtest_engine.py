@@ -515,7 +515,7 @@ def _print_report(report: BacktestReport) -> None:
     print(f"Max daily DD (1% risk): {report.max_daily_drawdown_pct:.2f}%")
     print(f"Max total DD (1% risk): {report.max_total_drawdown_pct:.2f}%")
     print(f"Costs: {report.spread_points:g} points x {report.point_size:g} price units")
-    print("\\nFunnel diagnostics:")
+    print("\nFunnel diagnostics:")
     for name, count in report.funnel_counts.items():
         print(f"  {name}: {count}")
     for title, groups in (("By regime", report.trades_by_regime), ("By POI type", report.trades_by_poi_type)):

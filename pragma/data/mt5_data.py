@@ -129,3 +129,66 @@ class MT5DataClient:
         unit = "ms" if time_col == "time_msc" else "s"
         frame["time"] = pd.to_datetime(frame[time_col], unit=unit, utc=True)
         return frame.set_index("time").sort_index()
+
+
+    @staticmethod
+    def tick_price_histogram(
+        ticks: pd.DataFrame,
+        bins: int = 100,
+        price_field: str | None = None,
+        volume_field: str | None = None,
+    ) -> pd.DataFrame:
+        """Build a tick-price histogram from a previously fetched tick frame.
+
+        Price preference is last, then bid, then ask unless price_field is set.
+        Weight preference is volume_real, then volume, then one count per tick.
+        A per-tick count histogram is tick activity, not traded volume; many FX
+        and CFD feeds do not expose trade volume on ticks.
+        """
+        import numpy as np
+
+        if bins < 2:
+            raise ValueError("bins must be >= 2")
+        if ticks.empty:
+            raise ValueError("ticks cannot be empty")
+        candidates = [price_field] if price_field else ["last", "bid", "ask"]
+        selected_price = next((name for name in candidates
+                               if name and name in ticks.columns
+                               and (pd.to_numeric(ticks[name], errors="coerce") > 0).any()), None)
+        if selected_price is None:
+            raise MT5DataError("Tick frame has no usable last/bid/ask price column")
+        prices = pd.to_numeric(ticks[selected_price], errors="coerce")
+        valid = prices.notna() & np.isfinite(prices) & (prices > 0)
+
+        selected_volume = volume_field
+        if selected_volume is None:
+            selected_volume = next((name for name in ("volume_real", "volume")
+                                    if name in ticks.columns
+                                    and (pd.to_numeric(ticks[name], errors="coerce") > 0).any()), None)
+        if selected_volume is not None:
+            if selected_volume not in ticks.columns:
+                raise ValueError(f"volume_field {selected_volume!r} not found")
+            weights = pd.to_numeric(ticks[selected_volume], errors="coerce")
+            valid &= weights.notna() & np.isfinite(weights) & (weights >= 0)
+            weights = weights.fillna(0).to_numpy(dtype=float)
+        else:
+            weights = np.ones(len(ticks), dtype=float)
+
+        prices_array = prices.to_numpy(dtype=float)
+        prices_array = prices_array[valid.to_numpy()]
+        weights = weights[valid.to_numpy()]
+        if len(prices_array) == 0:
+            raise MT5DataError("No valid ticks remain after price/volume validation")
+        if float(weights.sum()) <= 0:
+            raise MT5DataError("Tick weights sum to zero")
+        low, high = float(prices_array.min()), float(prices_array.max())
+        if np.isclose(low, high):
+            pad = max(abs(low) * 1e-9, np.finfo(float).eps * 16)
+            low, high = low - pad, high + pad
+        hist, edges = np.histogram(prices_array, bins=bins, range=(low, high), weights=weights)
+        return pd.DataFrame({
+            "price_low": edges[:-1],
+            "price_high": edges[1:],
+            "price": (edges[:-1] + edges[1:]) / 2,
+            "tick_weight": hist.astype(float),
+        })

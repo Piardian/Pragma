@@ -32,7 +32,7 @@ class MacroDecision:
     bias: Bias
     source: str = "begonya"
     reason: str = ""
-    gate: str = "NEUTRAL_RANGE"
+    gate: str = "UNMAPPED"
     timestamp: str | None = None
 
 

@@ -120,6 +120,17 @@ class MT5DataClient:
             raise MT5DataError("Invalid OHLC data: high is below low")
         return frame
 
+    def symbols(self) -> list[str]:
+        """Return symbol names exposed by the connected MT5 terminal."""
+        self.connect()
+        raw = self.mt5.symbols_get()
+        if raw is None:
+            raise MT5DataError(f"MT5 symbols_get failed: {self.mt5.last_error()}")
+        return sorted({
+            str(item.name) for item in raw
+            if getattr(item, "name", None)
+        }, key=str.upper)
+
     def rates(self, symbol: str, timeframe: str = "M1", count: int = 1500) -> pd.DataFrame:
         if count <= 0:
             raise ValueError("count must be positive")

@@ -9,6 +9,7 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from enum import IntEnum
 from pathlib import Path
 from typing import Any
@@ -59,7 +60,14 @@ def _parse_timestamp(value: Any) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        # Begonya currently emits naive timestamps in its producer's local
+        # timezone. Default to Istanbul, configurable for other deployments.
+        zone_name = os.environ.get("BEGONYA_MACRO_TIMEZONE", "Europe/Istanbul").strip()
+        try:
+            producer_timezone = ZoneInfo(zone_name)
+        except (ZoneInfoNotFoundError, ValueError):
+            return None
+        parsed = parsed.replace(tzinfo=producer_timezone)
     return parsed.astimezone(timezone.utc)
 
 

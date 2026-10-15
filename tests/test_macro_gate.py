@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from pragma.macro_gate import Bias, MacroGate
@@ -16,6 +17,20 @@ class BegonyaMacroGateTests(unittest.TestCase):
         }
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
+
+    def test_naive_begonya_timestamp_uses_istanbul_timezone(self):
+        # Begonya's current output uses a local timestamp without a UTC offset.
+        local_now = datetime.now(ZoneInfo("Europe/Istanbul")).replace(tzinfo=None)
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_gate(
+                directory,
+                timestamp=local_now.isoformat(timespec="seconds"),
+                gates={"EURUSD": "SHORT_ONLY"},
+            )
+            result = MacroGate(path).get_bias("EURUSD")
+            self.assertEqual(result.bias, Bias.SHORT)
+            self.assertEqual(result.source, "begonya")
+            self.assertTrue(MacroGate(path).gate_symbols())
 
     def test_reads_symbol_specific_long_gate(self):
         with tempfile.TemporaryDirectory() as directory:

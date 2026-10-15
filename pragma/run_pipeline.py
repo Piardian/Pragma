@@ -188,7 +188,8 @@ def run_pipeline(
             continue
         decision = evaluate_trigger(
             m1, poi.direction, poi.poi_low, poi.poi_high, atr_14,
-            poi.take_profits,
+            poi.take_profits, poi_type=poi.poi_type,
+            center_price=poi.center,
         )
         trigger_reports.append({
             "execute": decision.execute,

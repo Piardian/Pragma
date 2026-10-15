@@ -412,6 +412,7 @@ def run_backtest(
             decision = evaluate_trigger(
                 m1.iloc[max(0, i - 29):i + 1], poi.direction,
                 poi.poi_low, poi.poi_high, atr, poi.take_profits,
+                poi_type=poi.poi_type, center_price=poi.center,
             )
             metrics = decision.metrics
             if metrics.get("poi_touched"):

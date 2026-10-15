@@ -52,6 +52,8 @@ def evaluate_trigger(
     volume_multiplier: float = 1.35,
     z_extreme: float = 1.75,
     z_recovery: float = 1.65,
+    poi_type: str | None = None,
+    center_price: float | None = None,
 ) -> TriggerDecision:
     """Evaluate closed M1 bars using POI touch, Z recovery and volume climax."""
     direction = direction.upper()
@@ -132,12 +134,44 @@ def evaluate_trigger(
     risk = abs(entry - stop_loss)
     rr_tp1 = abs(tp1 - entry) / risk if tp1 is not None and risk > 0 else None
     rr_tp2 = abs(tp2 - entry) / risk if tp2 is not None and risk > 0 else None
-    target_fallback = bool(rr_tp1 is not None and rr_tp1 < min_rr
-                           and rr_tp2 is not None and rr_tp2 >= min_rr)
+    distinct_targets = bool(
+        tp1 is not None and tp2 is not None and abs(tp1 - tp2) > 1e-12
+    )
+    split_rr_ok = bool(
+        distinct_targets and rr_tp1 is not None and rr_tp1 >= 1.0
+        and rr_tp2 is not None and rr_tp2 >= 1.8
+    )
+    target_fallback = bool(
+        distinct_targets and rr_tp1 is not None and rr_tp1 < 1.0
+        and rr_tp2 is not None and rr_tp2 >= 1.5
+    )
     if target_fallback:
         tp1 = tp2
         rr_tp1 = rr_tp2
+    single_target_rr_ok = bool(
+        not distinct_targets and rr_tp1 is not None and rr_tp1 >= min_rr
+    )
     rr = rr_tp1
+    center = float(center_price) if center_price is not None else (poi_low + poi_high) / 2.0
+    reclaim_required = poi_type in ("LONG_MEAN_REVERSION", "SHORT_MEAN_REVERSION")
+    if poi_type == "LONG_MEAN_REVERSION":
+        level_reclaim = bool(
+            float(last["close"]) >= center
+            or (
+                float(last["close"]) > float(last["open"])
+                and float(last["close"]) >= poi_low + 0.5 * (poi_high - poi_low)
+            )
+        )
+    elif poi_type == "SHORT_MEAN_REVERSION":
+        level_reclaim = bool(
+            float(last["close"]) <= center
+            or (
+                float(last["close"]) < float(last["open"])
+                and float(last["close"]) <= poi_high - 0.5 * (poi_high - poi_low)
+            )
+        )
+    else:
+        level_reclaim = True
     metrics = {
         "poi_touched": poi_touched,
         "poi_touch_positions": [int(p) for p in touched_positions],
@@ -157,6 +191,13 @@ def evaluate_trigger(
         "rr_tp1": rr_tp1,
         "rr_tp2": rr_tp2,
         "target_fallback_to_tp2": target_fallback,
+        "distinct_targets": distinct_targets,
+        "split_rr_gate": split_rr_ok,
+        "single_target_rr_gate": single_target_rr_ok,
+        "poi_type": poi_type,
+        "center_price": center,
+        "level_reclaim_required": reclaim_required,
+        "level_reclaim": level_reclaim,
         "min_rr": min_rr,
         "entry_price": entry,
         "stop_loss": stop_loss,
@@ -176,9 +217,16 @@ def evaluate_trigger(
         return decision(False, "VOLUME_CLIMAX_NOT_CONFIRMED")
     if not rejection:
         return decision(False, "REJECTION_NOT_CONFIRMED")
+    if reclaim_required and not level_reclaim:
+        return decision(False, "LEVEL_RECLAIM_NOT_CONFIRMED")
     if tp1 is None:
         return decision(False, "NO_VALID_TP")
-    if rr is None or rr < min_rr:
+    if target_fallback:
+        pass
+    elif distinct_targets:
+        if not split_rr_ok:
+            return decision(False, "LOW_RR")
+    elif not single_target_rr_ok:
         return decision(False, "LOW_RR")
     return decision(True, "EXECUTE")
 

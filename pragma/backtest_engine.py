@@ -81,6 +81,80 @@ class _OpenTrade:
     tp1_taken: bool = False
 
 
+def _trade_record(position: _OpenTrade, timestamp: pd.Timestamp,
+                  reason: str) -> BacktestTrade:
+    return BacktestTrade(
+        position.symbol, position.direction, position.poi_type, position.regime,
+        position.entry_time.isoformat(), timestamp.isoformat(),
+        position.entry_price, position.initial_stop_loss, position.tp1, position.tp2,
+        reason, float(position.r_multiple), position.tp1_taken,
+    )
+
+
+def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
+                       timestamp: pd.Timestamp, cost: float = 0.0) -> BacktestTrade | None:
+    """Advance one subsequent closed candle; return a record only when flat."""
+    if timestamp <= position.entry_time:
+        return None
+    low, high = float(bar["low"]), float(bar["high"])
+    direction = position.direction
+    stop_hit = low <= position.stop_loss if direction == "LONG" else high >= position.stop_loss
+    if stop_hit:
+        exit_price = _adverse_price(position.stop_loss, direction, False, cost)
+        if position.tp1_taken:
+            remaining_r = 0.5 * (
+                (exit_price - position.entry_price) if direction == "LONG"
+                else (position.entry_price - exit_price)
+            ) / position.initial_risk
+            position.r_multiple += remaining_r
+            reason = "BREAKEVEN_STOP" if abs(position.stop_loss - position.entry_price) < 1e-12 else "STOP_LOSS"
+        else:
+            position.r_multiple = (
+                (exit_price - position.entry_price) if direction == "LONG"
+                else (position.entry_price - exit_price)
+            ) / position.initial_risk
+            reason = "STOP_LOSS"
+        return _trade_record(position, timestamp, reason)
+
+    tp1_hit = high >= position.tp1 if direction == "LONG" else low <= position.tp1
+    tp2_hit = high >= position.tp2 if direction == "LONG" else low <= position.tp2
+    if not position.tp1_taken and tp1_hit:
+        tp1_exit = _adverse_price(position.tp1, direction, False, cost)
+        position.r_multiple += 0.5 * (
+            (tp1_exit - position.entry_price) if direction == "LONG"
+            else (position.entry_price - tp1_exit)
+        ) / position.initial_risk
+        position.tp1_taken = True
+        position.stop_loss = position.entry_price
+        # OHLC cannot reveal target ordering. If TP2 is also touched, treat the
+        # remaining half as breakeven when that level was crossed in the candle.
+        breakeven_hit = low <= position.entry_price if direction == "LONG" else high >= position.entry_price
+        if tp2_hit and not breakeven_hit:
+            tp2_exit = _adverse_price(position.tp2, direction, False, cost)
+            position.r_multiple += 0.5 * (
+                (tp2_exit - position.entry_price) if direction == "LONG"
+                else (position.entry_price - tp2_exit)
+            ) / position.initial_risk
+            return _trade_record(position, timestamp, "TP1_TP2_SAME_BAR")
+        if breakeven_hit:
+            be_exit = _adverse_price(position.entry_price, direction, False, cost)
+            position.r_multiple += 0.5 * (
+                (be_exit - position.entry_price) if direction == "LONG"
+                else (position.entry_price - be_exit)
+            ) / position.initial_risk
+            return _trade_record(position, timestamp, "TP1_THEN_BREAKEVEN_SAME_BAR")
+        return None
+
+    if position.tp1_taken and tp2_hit:
+        tp2_exit = _adverse_price(position.tp2, direction, False, cost)
+        position.r_multiple += 0.5 * (
+            (tp2_exit - position.entry_price) if direction == "LONG"
+            else (position.entry_price - tp2_exit)
+        ) / position.initial_risk
+        return _trade_record(position, timestamp, "TAKE_PROFIT_2")
+    return None
+
+
 def _utc_index(frame: pd.DataFrame, name: str) -> pd.DataFrame:
     if not isinstance(frame.index, pd.DatetimeIndex):
         raise ValueError(f"{name} must have a DatetimeIndex")
@@ -277,84 +351,11 @@ def run_backtest(
         processed += 1
 
         # Manage an existing trade first, using only this fully closed candle.
-        if position is not None and timestamp > position.entry_time:
-            low, high = float(bar["low"]), float(bar["high"])
-            direction = position.direction
-            stop_hit = low <= position.stop_loss if direction == "LONG" else high >= position.stop_loss
-            if stop_hit:
-                exit_price = _adverse_price(position.stop_loss, direction, False, cost)
-                if position.tp1_taken:
-                    remaining_r = 0.5 * (
-                        (exit_price - position.entry_price) if direction == "LONG"
-                        else (position.entry_price - exit_price)
-                    ) / position.initial_risk
-                    position.r_multiple += remaining_r
-                    reason = "BREAKEVEN_STOP" if abs(position.stop_loss - position.entry_price) < 1e-12 else "STOP_LOSS"
-                else:
-                    position.r_multiple = (
-                        (exit_price - position.entry_price) if direction == "LONG"
-                        else (position.entry_price - exit_price)
-                    ) / position.initial_risk
-                    reason = "STOP_LOSS"
-                trades.append(BacktestTrade(
-                    position.symbol, position.direction, position.poi_type, position.regime,
-                    position.entry_time.isoformat(), timestamp.isoformat(),
-                    position.entry_price, position.initial_stop_loss, position.tp1, position.tp2,
-                    reason, float(position.r_multiple), position.tp1_taken,
-                ))
+        if position is not None:
+            closed_trade = _manage_open_trade(position, bar, timestamp, cost)
+            if closed_trade is not None:
+                trades.append(closed_trade)
                 position = None
-            else:
-                tp1_hit = (high >= position.tp1) if direction == "LONG" else (low <= position.tp1)
-                tp2_hit = (high >= position.tp2) if direction == "LONG" else (low <= position.tp2)
-                if not position.tp1_taken and tp1_hit:
-                    tp1_exit = _adverse_price(position.tp1, direction, False, cost)
-                    position.r_multiple += 0.5 * (
-                        (tp1_exit - position.entry_price) if direction == "LONG"
-                        else (position.entry_price - tp1_exit)
-                    ) / position.initial_risk
-                    position.tp1_taken = True
-                    position.stop_loss = position.entry_price
-                    # OHLC cannot reveal target ordering. If both targets are
-                    # inside this candle, conservatively assume the remaining
-                    # half returns to breakeven whenever that level was crossed.
-                    breakeven_hit = low <= position.entry_price if direction == "LONG" else high >= position.entry_price
-                    if tp2_hit and not breakeven_hit:
-                        tp2_exit = _adverse_price(position.tp2, direction, False, cost)
-                        position.r_multiple += 0.5 * (
-                            (tp2_exit - position.entry_price) if direction == "LONG"
-                            else (position.entry_price - tp2_exit)
-                        ) / position.initial_risk
-                        exit_reason = "TP1_TP2_SAME_BAR"
-                    elif breakeven_hit:
-                        be_exit = _adverse_price(position.entry_price, direction, False, cost)
-                        position.r_multiple += 0.5 * (
-                            (be_exit - position.entry_price) if direction == "LONG"
-                            else (position.entry_price - be_exit)
-                        ) / position.initial_risk
-                        exit_reason = "TP1_THEN_BREAKEVEN_SAME_BAR"
-                    else:
-                        exit_reason = ""
-                    if exit_reason:
-                        trades.append(BacktestTrade(
-                            position.symbol, position.direction, position.poi_type, position.regime,
-                            position.entry_time.isoformat(), timestamp.isoformat(),
-                            position.entry_price, position.initial_stop_loss, position.tp1, position.tp2,
-                            exit_reason, float(position.r_multiple), True,
-                        ))
-                        position = None
-                elif position.tp1_taken and tp2_hit:
-                    tp2_exit = _adverse_price(position.tp2, direction, False, cost)
-                    position.r_multiple += 0.5 * (
-                        (tp2_exit - position.entry_price) if direction == "LONG"
-                        else (position.entry_price - tp2_exit)
-                    ) / position.initial_risk
-                    trades.append(BacktestTrade(
-                        position.symbol, position.direction, position.poi_type, position.regime,
-                        position.entry_time.isoformat(), timestamp.isoformat(),
-                        position.entry_price, position.initial_stop_loss, position.tp1, position.tp2,
-                        "TAKE_PROFIT_2", float(position.r_multiple), True,
-                    ))
-                    position = None
 
         # Never open a second position while one remains open.
         if position is not None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -93,6 +94,7 @@ def run_pipeline(
     dry_run: bool = False,
     notifier: Any | None = None,
     now: datetime | pd.Timestamp | None = None,
+    notify_pois: bool = True,
 ) -> dict[str, Any]:
     """Run all analytical layers and return a JSON-serializable report."""
     clock = pd.Timestamp(now if now is not None else datetime.now(timezone.utc))
@@ -178,7 +180,7 @@ def run_pipeline(
             "take_profits": list(poi.take_profits),
             "intersects_last_closed_m1": bool(intersects),
         })
-        if hasattr(notifier_instance, "notify_poi"):
+        if notify_pois and hasattr(notifier_instance, "notify_poi"):
             notifications.append(notifier_instance.notify_poi(
                 symbol, poi, regime_decision.regime, last_bar_time
             ))
@@ -251,6 +253,53 @@ def run_pipeline(
     }
 
 
+def _latest_closed_m1_time(symbol: str) -> pd.Timestamp | None:
+    """Cheap watch poll: return the timestamp of the latest fully closed M1 bar."""
+    with MT5DataClient() as client:
+        raw = client.rates(symbol, "M1", 3)
+    closed = filter_closed_bars(raw, "M1", now=pd.Timestamp.now(tz="UTC"))
+    return None if closed.empty else pd.Timestamp(closed.index[-1])
+
+
+def _watch(args: argparse.Namespace) -> int:
+    if args.dry_run:
+        raise ValueError("--watch requires a live MT5 connection; --dry-run is not supported")
+    if args.interval_sec < 1:
+        raise ValueError("--interval-sec must be >= 1")
+    notifier = ExecutionNotifier()
+    last_processed_bar_time: str | None = None
+    print(f"PRAGMA WATCH started | symbol={args.symbol} | poll={args.interval_sec}s")
+    try:
+        while True:
+            try:
+                latest_time = _latest_closed_m1_time(args.symbol)
+                if latest_time is not None and latest_time.isoformat() != last_processed_bar_time:
+                    result = run_pipeline(
+                        symbol=args.symbol, bars_count=args.bars,
+                        profile_bins=args.profile_bins, macro_bias=args.macro_bias,
+                        dry_run=False, notifier=notifier, notify_pois=False,
+                    )
+                    bar_time = result["bars"]["last_closed_m1_time"]
+                    # The pipeline may finish on a bar newer than the cheap poll.
+                    last_processed_bar_time = bar_time
+                    triggers = result.get("triggers", [])
+                    executed = any(item.get("execute") is True for item in triggers)
+                    status = "EXECUTE" if executed else "WAIT"
+                    stamp = result["bars"]["last_closed_m1_time"]
+                    price = float(result["bars"]["last_closed_m1_close"])
+                    print(
+                        f"[{stamp}] {args.symbol} {price:.5f} | "
+                        f"{result['regime']} | Active POI: {len(result.get('pois', []))} | {status}",
+                        flush=True,
+                    )
+            except Exception as exc:
+                print(f"[{pd.Timestamp.now(tz='UTC').isoformat()}] WATCH_ERROR | {exc}", flush=True)
+            time.sleep(args.interval_sec)
+    except KeyboardInterrupt:
+        print("PRAGMA WATCH stopped by Ctrl+C", flush=True)
+        return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Pragma end-to-end quantitative pipeline")
     parser.add_argument("--symbol", default="XAUUSD")
@@ -259,7 +308,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--macro-bias", type=int, choices=(-1, 0, 1), default=None)
     parser.add_argument("--dry-run", action="store_true",
                         help="Run the complete pipeline using deterministic synthetic M1 data")
+    parser.add_argument("--watch", action="store_true",
+                        help="Continuously process only newly closed M1 bars (live MT5)")
+    parser.add_argument("--interval-sec", type=int, default=15,
+                        help="Watch polling interval in seconds (default: 15)")
     args = parser.parse_args(argv)
+    if args.watch:
+        return _watch(args)
     result = run_pipeline(
         symbol=args.symbol, bars_count=args.bars, profile_bins=args.profile_bins,
         macro_bias=args.macro_bias, dry_run=args.dry_run,

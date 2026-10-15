@@ -6,6 +6,9 @@ from dataclasses import dataclass
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
+# UTC hour interval [start, end): active London/New York trading window.
+ACTIVE_TRADING_HOURS_UTC = (6, 20)
+
 
 @dataclass(frozen=True)
 class Settings:

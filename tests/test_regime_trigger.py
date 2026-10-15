@@ -35,7 +35,11 @@ class RegimePOITests(unittest.TestCase):
     def test_balance_long_mean_reversion_poi(self):
         result = generate_regime_pois(1, self.profile, self.vwap(), 100.0, 2.0)
         self.assertEqual(result.regime, MarketRegime.BALANCE)
-        self.assertTrue(any(p.poi_type == "LONG_MEAN_REVERSION" for p in result.pois))
+        self.assertEqual(result.pois, ())
+        opted_in = generate_regime_pois(
+            1, self.profile, self.vwap(), 100.0, 2.0, allow_mean_reversion=True
+        )
+        self.assertTrue(any(p.poi_type == "LONG_MEAN_REVERSION" for p in opted_in.pois))
         poi = next(p for p in result.pois if p.poi_type == "LONG_MEAN_REVERSION")
         self.assertAlmostEqual(poi.poi_high - poi.poi_low, 1.4)
         self.assertIn(100.0, poi.take_profits)
@@ -50,7 +54,11 @@ class RegimePOITests(unittest.TestCase):
     def test_balance_short_mean_reversion_poi(self):
         result = generate_regime_pois(-1, self.profile, self.vwap(), 100.0, 2.0)
         self.assertEqual(result.regime, MarketRegime.BALANCE)
-        self.assertTrue(any(p.poi_type == "SHORT_MEAN_REVERSION" for p in result.pois))
+        self.assertEqual(result.pois, ())
+        opted_in = generate_regime_pois(
+            -1, self.profile, self.vwap(), 100.0, 2.0, allow_mean_reversion=True
+        )
+        self.assertTrue(any(p.poi_type == "SHORT_MEAN_REVERSION" for p in opted_in.pois))
 
     def test_bear_imbalance_short_pullback(self):
         result = generate_regime_pois(-1, self.profile, self.vwap(value=98.0), 97.0, 2.0)
@@ -110,7 +118,8 @@ class RegimePOITests(unittest.TestCase):
 
     def test_neutral_range_allows_balance_mean_reversion_only(self):
         result = generate_regime_pois(
-            0, self.profile, self.vwap(), 100.0, 2.0, allow_range=True
+            0, self.profile, self.vwap(), 100.0, 2.0,
+            allow_range=True, allow_mean_reversion=True,
         )
         self.assertEqual(result.regime, MarketRegime.BALANCE)
         self.assertTrue(result.pois)
@@ -119,6 +128,20 @@ class RegimePOITests(unittest.TestCase):
         ) for p in result.pois))
         self.assertTrue(any(p.poi_type == "LONG_MEAN_REVERSION" for p in result.pois))
         self.assertTrue(any(p.poi_type == "SHORT_MEAN_REVERSION" for p in result.pois))
+
+    def test_bull_imbalance_requires_vwap_poc_separation(self):
+        result = generate_regime_pois(
+            1, self.profile, self.vwap(value=100.2), 103.0, 2.0
+        )
+        self.assertEqual(result.regime, MarketRegime.IMBALANCE_BULL)
+        self.assertEqual(result.pois, ())
+
+    def test_bear_imbalance_requires_vwap_poc_separation(self):
+        result = generate_regime_pois(
+            -1, self.profile, self.vwap(value=99.8), 97.0, 2.0
+        )
+        self.assertEqual(result.regime, MarketRegime.IMBALANCE_BEAR)
+        self.assertEqual(result.pois, ())
 
     def test_transition_when_price_and_vwap_disagree(self):
         self.assertEqual(classify_regime(103, self.profile, {"vwap": 99}),
@@ -181,6 +204,55 @@ class TriggerTests(unittest.TestCase):
         self.assertEqual(result.reason, "EXECUTE")
         self.assertEqual(result.direction, "SHORT")
         self.assertGreaterEqual(result.rr_ratio, 1.5)
+
+    def test_rejects_outside_active_utc_session(self):
+        bars = self.bars("LONG")
+        bars.index = pd.date_range("2026-10-15T02:00:00Z", periods=len(bars), freq="min")
+        result = evaluate_trigger(bars, "LONG", 98.0, 102.0, atr_14=2.0,
+                                  take_profit=110.0)
+        self.assertFalse(result.execute)
+        self.assertEqual(result.reason, "SESSION_HOURS")
+        self.assertFalse(result.metrics["session_allowed"])
+
+    def test_rejects_when_spread_is_too_large_relative_to_stop(self):
+        result = evaluate_trigger(
+            self.bars("LONG"), "LONG", 99.0, 102.0, atr_14=2.0,
+            take_profit=110.0, cost_price=0.7,
+        )
+        self.assertFalse(result.execute)
+        self.assertEqual(result.reason, "HIGH_SPREAD_TO_SL")
+        self.assertTrue(result.metrics["high_spread_to_sl"])
+
+    def test_trend_pullback_requires_higher_net_rr(self):
+        result = evaluate_trigger(
+            self.bars("LONG"), "LONG", 98.0, 102.0, atr_14=2.0,
+            take_profit=[103.2, 105.5], poi_type="LONG_TREND_PULLBACK",
+        )
+        self.assertTrue(result.execute, result.reason)
+        self.assertGreaterEqual(result.metrics["rr_tp1"], 1.2)
+        self.assertGreaterEqual(result.metrics["rr_tp2"], 2.0)
+
+    def test_trend_pullback_promotes_tp2_when_tp1_rr_is_low(self):
+        result = evaluate_trigger(
+            self.bars("LONG"), "LONG", 98.0, 102.0, atr_14=2.0,
+            take_profit=[102.8, 104.8], poi_type="LONG_TREND_PULLBACK",
+        )
+        self.assertTrue(result.execute, result.reason)
+        self.assertTrue(result.metrics["target_fallback_to_tp2"])
+        self.assertEqual(result.take_profit_1, 104.8)
+        self.assertGreaterEqual(result.metrics["rr_ratio"], 1.6)
+
+    def test_spread_cost_changes_effective_rr(self):
+        baseline = evaluate_trigger(
+            self.bars("LONG"), "LONG", 98.0, 102.0, atr_14=2.0,
+            take_profit=110.0,
+        )
+        costly = evaluate_trigger(
+            self.bars("LONG"), "LONG", 98.0, 102.0, atr_14=2.0,
+            take_profit=110.0, cost_price=0.2,
+        )
+        self.assertGreater(baseline.metrics["rr_ratio"], costly.metrics["rr_ratio"])
+        self.assertAlmostEqual(costly.metrics["effective_entry"], costly.entry_price + 0.2)
 
     def test_low_rr_blocks_execute(self):
         result = evaluate_trigger(self.bars("LONG"), "LONG", 98.0, 102.0,

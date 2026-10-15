@@ -134,6 +134,7 @@ class WalkForwardTests(unittest.TestCase):
         self.assertEqual(report.net_r, 0.0)
         self.assertEqual(report.expectancy_r, 0.0)
         self.assertIn("sessions_evaluated", report.funnel_counts)
+        self.assertIn("rejected_session_hours", report.funnel_counts)
         self.assertEqual(report.funnel_counts["trades_opened"], 0)
 
 

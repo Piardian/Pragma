@@ -95,6 +95,8 @@ def run_pipeline(
     notifier: Any | None = None,
     now: datetime | pd.Timestamp | None = None,
     notify_pois: bool = True,
+    allow_mean_reversion: bool = False,
+    cost_price: float = 0.0,
 ) -> dict[str, Any]:
     """Run all analytical layers and return a JSON-serializable report."""
     clock = pd.Timestamp(now if now is not None else datetime.now(timezone.utc))
@@ -153,7 +155,7 @@ def run_pipeline(
     atr_14 = _atr_from_m15(m15)
     regime_decision = generate_regime_pois(
         bias, profiles.previous, latest_vwap, current_price, atr_14,
-        allow_range=allow_range,
+        allow_range=allow_range, allow_mean_reversion=allow_mean_reversion,
     )
 
     notifier_instance = notifier
@@ -189,7 +191,7 @@ def run_pipeline(
         decision = evaluate_trigger(
             m1, poi.direction, poi.poi_low, poi.poi_high, atr_14,
             poi.take_profits, poi_type=poi.poi_type,
-            center_price=poi.center,
+            center_price=poi.center, cost_price=cost_price,
         )
         trigger_reports.append({
             "execute": decision.execute,
@@ -254,6 +256,17 @@ def run_pipeline(
     }
 
 
+def _default_point_size(symbol: str) -> float:
+    name = symbol.upper()
+    if name.startswith(("XAU", "XAG", "BTC", "SOL")):
+        return 0.01
+    if "JPY" in name:
+        return 0.001
+    if name.startswith(("SPX", "NAS", "US30")):
+        return 0.1
+    return 0.00001
+
+
 def _latest_closed_m1_time(symbol: str) -> pd.Timestamp | None:
     """Cheap watch poll: return the timestamp of the latest fully closed M1 bar."""
     with MT5DataClient() as client:
@@ -279,6 +292,8 @@ def _watch(args: argparse.Namespace) -> int:
                         symbol=args.symbol, bars_count=args.bars,
                         profile_bins=args.profile_bins, macro_bias=args.macro_bias,
                         dry_run=False, notifier=notifier, notify_pois=False,
+                        allow_mean_reversion=args.allow_mean_reversion,
+                        cost_price=args.spread_points * (args.point_size if args.point_size is not None else _default_point_size(args.symbol)),
                     )
                     bar_time = result["bars"]["last_closed_m1_time"]
                     # The pipeline may finish on a bar newer than the cheap poll.
@@ -313,12 +328,21 @@ def main(argv: list[str] | None = None) -> int:
                         help="Continuously process only newly closed M1 bars (live MT5)")
     parser.add_argument("--interval-sec", type=int, default=15,
                         help="Watch polling interval in seconds (default: 15)")
+    parser.add_argument("--allow-mean-reversion", action="store_true",
+                        help="Opt in to BALANCE mean-reversion POIs (disabled by default)")
+    parser.add_argument("--spread-points", type=float, default=0.0,
+                        help="Spread/slippage cost in instrument points")
+    parser.add_argument("--point-size", type=float, default=None,
+                        help="Price units per point; inferred by symbol when omitted")
     args = parser.parse_args(argv)
     if args.watch:
         return _watch(args)
+    point_size = args.point_size if args.point_size is not None else _default_point_size(args.symbol)
+    cost_price = args.spread_points * point_size
     result = run_pipeline(
         symbol=args.symbol, bars_count=args.bars, profile_bins=args.profile_bins,
         macro_bias=args.macro_bias, dry_run=args.dry_run,
+        allow_mean_reversion=args.allow_mean_reversion, cost_price=cost_price,
     )
     print(json.dumps(result, indent=2, default=str))
     return 0

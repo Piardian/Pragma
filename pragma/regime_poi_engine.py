@@ -129,6 +129,7 @@ def classify_regime(current_price: float, previous_profile: Any,
 def generate_regime_pois(
     macro_bias: int, previous_profile: Any, vwap: Any,
     current_price: float, atr_14: float, *, allow_range: bool = False,
+    allow_mean_reversion: bool = False,
 ) -> RegimePOIDecision:
     """Classify regime and generate only spec-defined directional POIs.
 
@@ -194,7 +195,7 @@ def generate_regime_pois(
 
     lvns = _get(previous_profile, "pdLVN", "pd_lvn", default=()) or ()
     long_mean_reversion_allowed = (
-        regime == MarketRegime.BALANCE and balance_window
+        allow_mean_reversion and regime == MarketRegime.BALANCE and balance_window
         and (
             (macro_bias == 1 and vwap_value >= val)
             or (macro_bias == 0 and allow_range)
@@ -214,7 +215,11 @@ def generate_regime_pois(
             if match:
                 add("LONG", "LONG_MEAN_REVERSION", match[0],
                     (lower_1, vwap_value, poc), match[1])
-    if macro_bias == 1 and regime == MarketRegime.IMBALANCE_BULL:
+    # Require VWAP to separate materially from prior-session POC before
+    # treating an upside imbalance as a tradable trend regime.
+    bull_imbalance_quality = vwap_value >= poc + (0.15 * atr)
+    bear_imbalance_quality = vwap_value <= poc - (0.15 * atr)
+    if macro_bias == 1 and regime == MarketRegime.IMBALANCE_BULL and bull_imbalance_quality:
         for name, level in (("lower_1p0sigma", lower_1), ("vwap", vwap_value)):
             match = _pair_if_confluent("pdVAH", vah, name, level, tolerance)
             if match:
@@ -232,7 +237,7 @@ def generate_regime_pois(
                 add("LONG", "LONG_TREND_PULLBACK", level,
                     (upper_1_5, upper_2_5), ("price_pullback", name))
     short_mean_reversion_allowed = (
-        regime == MarketRegime.BALANCE and balance_window
+        allow_mean_reversion and regime == MarketRegime.BALANCE and balance_window
         and (
             (macro_bias == -1 and vwap_value <= vah)
             or (macro_bias == 0 and allow_range)
@@ -252,7 +257,7 @@ def generate_regime_pois(
             if match:
                 add("SHORT", "SHORT_MEAN_REVERSION", match[0],
                     (upper_1, vwap_value, poc), match[1])
-    if macro_bias == -1 and regime == MarketRegime.IMBALANCE_BEAR:
+    if macro_bias == -1 and regime == MarketRegime.IMBALANCE_BEAR and bear_imbalance_quality:
         for name, level in (("upper_1p0sigma", upper_1), ("vwap", vwap_value)):
             match = _pair_if_confluent("pdVAL", val, name, level, tolerance)
             if match:
@@ -272,7 +277,7 @@ def generate_regime_pois(
 
     # NEUTRAL_RANGE means range-only permission: allow both edges in balance,
     # but never allow trend-pullback POIs without a directional macro gate.
-    if macro_bias == 0 and allow_range and balance_window:
+    if allow_mean_reversion and macro_bias == 0 and allow_range and balance_window:
         candidates = [("pdVAH", vah)]
         nearest_lvn = _nearest_lvn(lvns, vah, "above")
         if nearest_lvn is not None:
@@ -299,6 +304,10 @@ def generate_regime_pois(
 
 class RegimePOIEngine:
     def evaluate(self, macro_bias: int, previous_profile: Any, vwap: Any,
-                 current_price: float, atr_14: float) -> RegimePOIDecision:
-        return generate_regime_pois(macro_bias, previous_profile, vwap,
-                                    current_price, atr_14)
+                 current_price: float, atr_14: float, *,
+                 allow_range: bool = False,
+                 allow_mean_reversion: bool = False) -> RegimePOIDecision:
+        return generate_regime_pois(
+            macro_bias, previous_profile, vwap, current_price, atr_14,
+            allow_range=allow_range, allow_mean_reversion=allow_mean_reversion,
+        )

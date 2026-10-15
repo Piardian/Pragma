@@ -154,7 +154,7 @@ def calculate_volume_profile(
 
     # Rows are bars, columns are bins. Include any bin intersecting [low, high].
     intersects = ((bar_lows[:, None] < edges[1:][None, :])
-                  & (bar_highs[:, None] >= edges[:-1][None, :]))
+                  & (bar_highs[:, None] > edges[:-1][None, :]))
     zero_range = np.isclose(bar_lows, bar_highs)
     if zero_range.any():
         intersects[zero_range, :] = False

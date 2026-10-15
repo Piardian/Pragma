@@ -48,3 +48,37 @@ with `BEGONYA_MACRO_MAX_AGE_HOURS`.
 Pragma reads Begonya's output artifact; it does not start Begonya's macro engine
 or refresh its gate file. Begonya must be running on its own schedule for this
 file to stay current.
+
+
+## Continuous multi-market scanner (Windows)
+
+The scanner reads Begonya's fresh gate file, matches its symbol universe to
+symbols available in the MT5 terminal, and runs the Pragma pipeline once per
+matched symbol. It then waits for the next 15-minute clock boundary.
+
+Run one cycle:
+```powershell
+python -m pragma.market_scanner --once --bars 3000
+```
+
+Run continuously:
+```powershell
+python -m pragma.market_scanner --interval-minutes 15 --bars 3000
+```
+
+POI alerts are sent when a qualifying zone is found; execution-candidate alerts
+are separate and are sent only when the M1 trigger and risk filters pass. Both
+go to Telegram when `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are configured;
+otherwise they print to the console. Set those as Windows user environment
+variables (do not commit credentials), then open a new terminal.
+
+For automatic startup after Windows sign-in, run PowerShell from the project
+folder:
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\\install_startup_task.ps1
+```
+
+The task starts at user logon, not before login. MetaTrader 5 must be installed,
+running, logged in, and connected to the broker; its available symbols must
+include the instruments to be scanned. Pragma does not place broker orders.

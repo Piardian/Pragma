@@ -101,9 +101,12 @@ def run_pipeline(
     else:
         clock = clock.tz_convert("UTC")
 
+    macro_decision = None
+    allow_range = False
     if macro_bias is None:
         macro_decision = MacroGate().get_bias(symbol)
         bias = int(macro_decision.bias)
+        allow_range = getattr(macro_decision, "gate", None) == "NEUTRAL_RANGE"
         macro_source = macro_decision.source
         macro_reason = macro_decision.reason
     else:
@@ -147,7 +150,8 @@ def run_pipeline(
     latest_vwap = vwap_frame.iloc[-1]
     atr_14 = _atr_from_m15(m15)
     regime_decision = generate_regime_pois(
-        bias, profiles.previous, latest_vwap, current_price, atr_14
+        bias, profiles.previous, latest_vwap, current_price, atr_14,
+        allow_range=allow_range,
     )
 
     notifier_instance = notifier

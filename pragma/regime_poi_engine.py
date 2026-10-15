@@ -207,6 +207,22 @@ def generate_regime_pois(
             if match:
                 add("SHORT", "SHORT_TREND_PULLBACK", match[0], (lower_2,), match[1])
 
+    # NEUTRAL_RANGE means range-only permission: allow both edges in balance,
+    # but never allow trend-pullback POIs without a directional macro gate.
+    if macro_bias == 0 and allow_range and regime == MarketRegime.BALANCE:
+        candidates = [("pdVAH", vah)]
+        nearest_lvn = _nearest_lvn(lvns, vah, "above")
+        if nearest_lvn is not None:
+            candidates.append(("pdLVN", nearest_lvn))
+        for level_name, level in candidates:
+            match = _level_vs_band_range(
+                level_name, level, "upper_1p5sigma", upper_1_5,
+                "upper_2p5sigma", upper_2_5, tolerance
+            )
+            if match:
+                add("SHORT", "SHORT_MEAN_REVERSION", match[0],
+                    (poc, vwap_value), match[1])
+
     unique: list[POIZone] = []
     seen: set[tuple[str, str, float]] = set()
     for poi in pois:

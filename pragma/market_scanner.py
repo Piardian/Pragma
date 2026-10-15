@@ -123,12 +123,20 @@ def main(argv: list[str] | None = None) -> int:
 
     notifier = ExecutionNotifier()
     while True:
+        cycle_failed = False
         try:
             run_scan_cycle(bars_count=args.bars, notifier=notifier)
         except Exception as exc:
+            cycle_failed = True
             print(f"[SCAN ERROR] {type(exc).__name__}: {exc}")
         if args.once:
-            return 0
+            return 1 if cycle_failed else 0
+        if cycle_failed:
+            wait = 60.0
+            next_run = datetime.now(timezone.utc) + timedelta(seconds=wait)
+            print(f"Retrying after startup/data error at {next_run.strftime('%Y-%m-%d %H:%M:%S UTC')}.")
+            time.sleep(wait)
+            continue
         wait = seconds_until_next_boundary(args.interval_minutes)
         next_run = datetime.now(timezone.utc) + timedelta(seconds=wait)
         print(

@@ -307,6 +307,7 @@ def run_backtest(
     spread_points: float = 0.0,
     point_size: float = 0.01,
     allow_range: bool = False,
+    allow_mean_reversion: bool = False,
 ) -> BacktestReport:
     """Simulate a single instrument without future-data leakage.
 
@@ -366,6 +367,8 @@ def run_backtest(
         "passed_volume": 0,
         "passed_rejection": 0,
         "rejected_low_rr": 0,
+        "rejected_session_hours": 0,
+        "rejected_high_spread_to_sl": 0,
         "trades_opened": 0,
     }
 
@@ -402,7 +405,8 @@ def run_backtest(
             continue
         price = float(bar["close"])
         regime_decision = generate_regime_pois(
-            macro_bias, profile, latest_vwap, price, atr, allow_range=allow_range
+            macro_bias, profile, latest_vwap, price, atr,
+            allow_range=allow_range, allow_mean_reversion=allow_mean_reversion,
         )
         if regime_decision.pois:
             funnel_counts["bars_with_active_poi"] += 1
@@ -412,7 +416,7 @@ def run_backtest(
             decision = evaluate_trigger(
                 m1.iloc[max(0, i - 29):i + 1], poi.direction,
                 poi.poi_low, poi.poi_high, atr, poi.take_profits,
-                poi_type=poi.poi_type, center_price=poi.center,
+                poi_type=poi.poi_type, center_price=poi.center, cost_price=cost,
             )
             metrics = decision.metrics
             if metrics.get("poi_touched"):
@@ -425,6 +429,10 @@ def run_backtest(
                             bar_rejection = True
             if decision.reason == "LOW_RR":
                 bar_low_rr = True
+            if decision.reason == "SESSION_HOURS":
+                funnel_counts["rejected_session_hours"] += 1
+            if decision.reason == "HIGH_SPREAD_TO_SL":
+                funnel_counts["rejected_high_spread_to_sl"] += 1
             decisions.append((poi, decision))
         funnel_counts["bars_touched_poi"] += int(bar_touched)
         funnel_counts["passed_zscore"] += int(bar_touched and bar_z)
@@ -539,6 +547,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Adverse spread/slippage cost in instrument points")
     parser.add_argument("--point-size", type=float, default=None,
                         help="Price units per point; inferred by symbol when omitted")
+    parser.add_argument("--allow-mean-reversion", action="store_true",
+                        help="Opt in to BALANCE mean-reversion POIs (disabled by default)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Use deterministic synthetic M1 data instead of MT5")
     args = parser.parse_args(argv)
@@ -566,6 +576,7 @@ def main(argv: list[str] | None = None) -> int:
         m1, symbol=args.symbol, macro_bias=bias, m15_bars=m15,
         profile_bins=args.profile_bins, spread_points=args.spread_points,
         point_size=point_size, allow_range=allow_range,
+        allow_mean_reversion=args.allow_mean_reversion,
     )
     _print_report(report)
     print("\nJSON:")

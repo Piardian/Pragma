@@ -8,6 +8,8 @@ from typing import Any, Sequence
 import numpy as np
 import pandas as pd
 
+from config.settings import ACTIVE_TRADING_HOURS_UTC
+
 
 @dataclass(frozen=True)
 class TriggerDecision:
@@ -54,6 +56,7 @@ def evaluate_trigger(
     z_recovery: float = 1.65,
     poi_type: str | None = None,
     center_price: float | None = None,
+    cost_price: float = 0.0,
 ) -> TriggerDecision:
     """Evaluate closed M1 bars using POI touch, Z recovery and volume climax."""
     direction = direction.upper()
@@ -80,6 +83,20 @@ def evaluate_trigger(
         raise ValueError("atr_14 must be a finite number greater than zero")
     if min_rr <= 0 or volume_multiplier <= 0:
         raise ValueError("min_rr and volume_multiplier must be positive")
+    if not isfinite(float(cost_price)) or float(cost_price) < 0:
+        raise ValueError("cost_price must be finite and non-negative")
+    cost_price = float(cost_price)
+    session_hour_utc = None
+    session_allowed = True
+    if isinstance(bars.index, pd.DatetimeIndex):
+        last_timestamp = pd.Timestamp(bars.index[-1])
+        if last_timestamp.tzinfo is None:
+            last_timestamp = last_timestamp.tz_localize("UTC")
+        else:
+            last_timestamp = last_timestamp.tz_convert("UTC")
+        session_hour_utc = int(last_timestamp.hour)
+        session_start, session_end = ACTIVE_TRADING_HOURS_UTC
+        session_allowed = session_start <= session_hour_utc < session_end
 
     close = bars["close"]
     sma_20 = close.rolling(20, min_periods=20).mean()
@@ -117,7 +134,8 @@ def evaluate_trigger(
         z_rule = f"Z>=+{abs(z_extreme):g} in last 5; current Z falls and <=+{abs(z_recovery):g}"
 
     entry = float(last["close"])
-    tp1, tp2 = _select_targets(take_profit, direction, entry)
+    effective_entry = entry + cost_price if direction == "LONG" else entry - cost_price
+    tp1, tp2 = _select_targets(take_profit, direction, effective_entry)
     touched_positions = [len(bars) - 3 + offset
                          for offset, touched in enumerate(touch_mask.to_numpy()) if touched]
     climax_pos = None
@@ -131,25 +149,37 @@ def evaluate_trigger(
                 break
     volume_ok = climax_pos is not None
 
-    risk = abs(entry - stop_loss)
-    rr_tp1 = abs(tp1 - entry) / risk if tp1 is not None and risk > 0 else None
-    rr_tp2 = abs(tp2 - entry) / risk if tp2 is not None and risk > 0 else None
+    risk = abs(effective_entry - stop_loss)
+    rr_tp1 = abs(tp1 - effective_entry) / risk if tp1 is not None and risk > 0 else None
+    rr_tp2 = abs(tp2 - effective_entry) / risk if tp2 is not None and risk > 0 else None
     distinct_targets = bool(
         tp1 is not None and tp2 is not None and abs(tp1 - tp2) > 1e-12
     )
-    split_rr_ok = bool(
-        distinct_targets and rr_tp1 is not None and rr_tp1 >= 1.0
-        and rr_tp2 is not None and rr_tp2 >= 1.8
-    )
-    target_fallback = bool(
-        distinct_targets and rr_tp1 is not None and rr_tp1 < 1.0
-        and rr_tp2 is not None and rr_tp2 >= 1.5
-    )
+    is_trend_pullback = poi_type in ("LONG_TREND_PULLBACK", "SHORT_TREND_PULLBACK")
+    if is_trend_pullback:
+        split_rr_ok = bool(
+            distinct_targets and rr_tp1 is not None and rr_tp1 >= 1.2
+            and rr_tp2 is not None and rr_tp2 >= 2.0
+        )
+        target_fallback = bool(
+            distinct_targets and rr_tp1 is not None and rr_tp1 < 1.2
+            and rr_tp2 is not None and rr_tp2 >= 1.6
+        )
+    else:
+        split_rr_ok = bool(
+            distinct_targets and rr_tp1 is not None and rr_tp1 >= 1.0
+            and rr_tp2 is not None and rr_tp2 >= 1.8
+        )
+        target_fallback = bool(
+            distinct_targets and rr_tp1 is not None and rr_tp1 < 1.0
+            and rr_tp2 is not None and rr_tp2 >= 1.5
+        )
     if target_fallback:
         tp1 = tp2
         rr_tp1 = rr_tp2
+    single_target_min_rr = 2.0 if is_trend_pullback else min_rr
     single_target_rr_ok = bool(
-        not distinct_targets and rr_tp1 is not None and rr_tp1 >= min_rr
+        not distinct_targets and rr_tp1 is not None and rr_tp1 >= single_target_min_rr
     )
     rr = rr_tp1
     center = float(center_price) if center_price is not None else (poi_low + poi_high) / 2.0
@@ -198,8 +228,13 @@ def evaluate_trigger(
         "center_price": center,
         "level_reclaim_required": reclaim_required,
         "level_reclaim": level_reclaim,
-        "min_rr": min_rr,
+        "min_rr": single_target_min_rr,
         "entry_price": entry,
+        "effective_entry": effective_entry,
+        "cost_price": cost_price,
+        "session_hour_utc": session_hour_utc,
+        "session_allowed": session_allowed,
+        "high_spread_to_sl": bool(cost_price > 0 and risk < 4.0 * cost_price),
         "stop_loss": stop_loss,
         "take_profit_1": tp1,
         "take_profit_2": tp2,
@@ -209,6 +244,10 @@ def evaluate_trigger(
         return TriggerDecision(execute, direction, entry, stop_loss, tp1, tp2,
                               tp1, rr, reason, metrics)
 
+    if not session_allowed:
+        return decision(False, "SESSION_HOURS")
+    if cost_price > 0 and risk < 4.0 * cost_price:
+        return decision(False, "HIGH_SPREAD_TO_SL")
     if not poi_touched:
         return decision(False, "OUTSIDE_POI")
     if not z_ok:

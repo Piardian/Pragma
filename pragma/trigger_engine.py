@@ -137,6 +137,10 @@ def evaluate_trigger(
     distinct_targets = bool(
         tp1 is not None and tp2 is not None and abs(tp1 - tp2) > 1e-12
     )
+    split_rr_ok = bool(
+        distinct_targets and rr_tp1 is not None and rr_tp1 >= 1.0
+        and rr_tp2 is not None and rr_tp2 >= 1.8
+    )
     target_fallback = bool(
         distinct_targets and rr_tp1 is not None and rr_tp1 < 1.0
         and rr_tp2 is not None and rr_tp2 >= 1.5
@@ -144,10 +148,6 @@ def evaluate_trigger(
     if target_fallback:
         tp1 = tp2
         rr_tp1 = rr_tp2
-    split_rr_ok = bool(
-        distinct_targets and rr_tp1 is not None and rr_tp1 >= 1.0
-        and rr_tp2 is not None and rr_tp2 >= 1.8
-    )
     single_target_rr_ok = bool(
         not distinct_targets and rr_tp1 is not None and rr_tp1 >= min_rr
     )

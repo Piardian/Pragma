@@ -120,7 +120,7 @@ def classify_regime(current_price: float, previous_profile: Any,
 
 def generate_regime_pois(
     macro_bias: int, previous_profile: Any, vwap: Any,
-    current_price: float, atr_14: float,
+    current_price: float, atr_14: float, *, allow_range: bool = False,
 ) -> RegimePOIDecision:
     """Classify regime and generate only spec-defined directional POIs.
 
@@ -161,7 +161,7 @@ def generate_regime_pois(
     lower_2_5 = band("vwap_lower_2p5sigma", vwap_value - 2.5 * sigma)
     upper_2_5 = band("vwap_upper_2p5sigma", vwap_value + 2.5 * sigma)
     regime = classify_regime(price, previous_profile, {"vwap": vwap_value})
-    if macro_bias == 0:
+    if macro_bias == 0 and not allow_range:
         return RegimePOIDecision(regime, macro_bias, price, atr, (), "NEUTRAL_MACRO")
 
     tolerance, half_width = 0.5 * atr, 0.25 * atr
@@ -174,7 +174,7 @@ def generate_regime_pois(
                             targets, sources))
 
     lvns = _get(previous_profile, "pdLVN", "pd_lvn", default=()) or ()
-    if macro_bias == 1 and regime == MarketRegime.BALANCE:
+    if (macro_bias == 1 or (macro_bias == 0 and allow_range)) and regime == MarketRegime.BALANCE:
         candidates = [("pdVAL", val)]
         nearest_lvn = _nearest_lvn(lvns, val, "below")
         if nearest_lvn is not None:
@@ -190,7 +190,7 @@ def generate_regime_pois(
             match = _pair_if_confluent("pdVAH", vah, name, level, tolerance)
             if match:
                 add("LONG", "LONG_TREND_PULLBACK", match[0], (upper_2,), match[1])
-    elif macro_bias == -1 and regime == MarketRegime.BALANCE:
+    elif (macro_bias == -1 or (macro_bias == 0 and allow_range)) and regime == MarketRegime.BALANCE:
         candidates = [("pdVAH", vah)]
         nearest_lvn = _nearest_lvn(lvns, vah, "above")
         if nearest_lvn is not None:

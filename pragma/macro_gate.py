@@ -100,6 +100,34 @@ class MacroGate:
             return str(value).upper(), str(key)
         return None, None
 
+    def gate_symbols(self) -> list[str]:
+        """Return supported symbols only when the published gate is fresh."""
+        try:
+            with self.path.open("r", encoding="utf-8") as file:
+                payload = json.load(file)
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(payload, dict):
+            return []
+        timestamp = _parse_timestamp(payload.get("timestamp"))
+        if timestamp is None:
+            return []
+        age_hours = (datetime.now(timezone.utc) - timestamp).total_seconds() / 3600.0
+        if age_hours < -1.0 or age_hours > self.max_age_hours:
+            return []
+        gates = payload.get("execution_bias_gates")
+        if not isinstance(gates, dict):
+            gates = payload.get("deterministic_execution_bias_gates")
+        if not isinstance(gates, dict):
+            gates = payload.get("deterministic_base_gates")
+        if not isinstance(gates, dict):
+            return []
+        return sorted(
+            str(symbol).upper()
+            for symbol, gate in gates.items()
+            if str(gate).upper() in _GATE_TO_BIAS
+        )
+
     def get_bias(self, symbol: str = "XAUUSD") -> MacroDecision:
         now = datetime.now(timezone.utc)
         if not self.path.is_file():

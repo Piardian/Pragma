@@ -1,16 +1,23 @@
 """Centralized defaults for Pragma. Override broker-specific symbols at runtime."""
+import os
 from dataclasses import dataclass
+
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 
 @dataclass(frozen=True)
 class Settings:
     symbol: str = "XAUUSD"
     timeframe: str = "M1"
-    history_bars: int = 1500
+    history_bars: int = 3000
     profile_bins: int = 100
     value_area_fraction: float = 0.70
     lvn_percentile: float = 20.0
     session_timezone: str = "UTC"
+    telegram_bot_token: str = TELEGRAM_BOT_TOKEN
+    telegram_chat_id: str = TELEGRAM_CHAT_ID
 
 
 TIMEFRAME_NAMES = {

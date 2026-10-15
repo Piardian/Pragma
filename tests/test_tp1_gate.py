@@ -17,6 +17,8 @@ class TP1RiskGateTests(unittest.TestCase):
         open_[-1] = close[-1] - 0.10
         high[-1] = close[-1] + 0.20
         low[-1] = close[-1] - 0.20
+        high[-2] = 102.1
+        low[-2] = 97.9
         volume = np.full(30, 10.0)
         volume[-2] = 100.0
         bars = pd.DataFrame({

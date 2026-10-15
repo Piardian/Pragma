@@ -18,7 +18,10 @@ def _clean_symbol(value: str) -> str:
 
 def resolve_symbols(gate_symbols: list[str], available_symbols: list[str]) -> list[str]:
     """Map Begonya base symbols to one best matching broker symbol each."""
-    available = sorted(set(available_symbols), key=lambda value: (len(value), value.upper()))
+    available = sorted(
+        set(available_symbols),
+        key=lambda value: (len(_clean_symbol(value)), value.upper()),
+    )
     chosen: set[str] = set()
     for base in gate_symbols:
         exact = [symbol for symbol in available if symbol.upper() == base.upper()]

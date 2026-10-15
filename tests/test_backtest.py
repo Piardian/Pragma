@@ -84,7 +84,7 @@ class WalkForwardTests(unittest.TestCase):
         )
         changed = base.copy()
         # Alter only future bars after the first 30 minutes of the second day.
-        changed.iloc[1470:, changed.columns.get_indexer(["open", "high", "low", "close"])] += 1000.0
+        changed.iloc[1471:, changed.columns.get_indexer(["open", "high", "low", "close"])] += 1000.0
 
         def capture(frame):
             observed = []

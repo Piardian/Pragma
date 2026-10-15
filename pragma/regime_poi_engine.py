@@ -100,16 +100,24 @@ def _level_vs_band_range(
 
 
 def classify_regime(current_price: float, previous_profile: Any,
-                    vwap: Any) -> MarketRegime:
-    """Apply the specified pdVA and VWAP-vs-pdPOC regime rules."""
+                    vwap: Any, atr_14: float = 0.0) -> MarketRegime:
+    """Classify with an ATR buffer so pullback regimes survive VA-edge tests."""
     price = _finite(current_price, "current_price")
     val = _finite(_get(previous_profile, "pdVAL", "pd_val"), "pdVAL")
     vah = _finite(_get(previous_profile, "pdVAH", "pd_vah"), "pdVAH")
     poc = _finite(_get(previous_profile, "pdPOC", "pd_poc"), "pdPOC")
     vwap_value = _finite(_get(vwap, "vwap"), "vwap")
+    atr = _finite(atr_14, "atr_14")
+    if atr < 0:
+        raise ValueError("atr_14 cannot be negative")
     if val > vah:
         raise ValueError("pdVAL must be less than or equal to pdVAH")
-    if val <= price <= vah:
+    buffer = 0.5 * atr
+    if vwap_value > poc and price >= vah - buffer:
+        return MarketRegime.IMBALANCE_BULL
+    if vwap_value < poc and price <= val + buffer:
+        return MarketRegime.IMBALANCE_BEAR
+    if val - buffer <= price <= vah + buffer:
         return MarketRegime.BALANCE
     if price > vah and vwap_value > poc:
         return MarketRegime.IMBALANCE_BULL
@@ -160,11 +168,12 @@ def generate_regime_pois(
     upper_1_5 = band("vwap_upper_1p5sigma", vwap_value + 1.5 * sigma)
     lower_2_5 = band("vwap_lower_2p5sigma", vwap_value - 2.5 * sigma)
     upper_2_5 = band("vwap_upper_2p5sigma", vwap_value + 2.5 * sigma)
-    regime = classify_regime(price, previous_profile, {"vwap": vwap_value})
+    regime = classify_regime(price, previous_profile, {"vwap": vwap_value}, atr)
     if macro_bias == 0 and not allow_range:
         return RegimePOIDecision(regime, macro_bias, price, atr, (), "NEUTRAL_MACRO")
 
-    tolerance, half_width = 0.5 * atr, 0.25 * atr
+    tolerance, half_width = 0.75 * atr, 0.35 * atr
+    balance_window = val - 0.5 * atr <= price <= vah + 0.5 * atr
     pois: list[POIZone] = []
 
     def add(direction: str, poi_type: str, center: float,
@@ -174,34 +183,38 @@ def generate_regime_pois(
                             targets, sources))
 
     lvns = _get(previous_profile, "pdLVN", "pd_lvn", default=()) or ()
-    if (macro_bias == 1 or (macro_bias == 0 and allow_range)) and regime == MarketRegime.BALANCE:
+    if (macro_bias == 1 or (macro_bias == 0 and allow_range)) and balance_window
         candidates = [("pdVAL", val)]
         nearest_lvn = _nearest_lvn(lvns, val, "below")
         if nearest_lvn is not None:
             candidates.append(("pdLVN", nearest_lvn))
         for level_name, level in candidates:
-            match = _level_vs_band_range(level_name, level, "lower_2p5sigma",
-                                         lower_2_5, "lower_1p5sigma", lower_1_5,
+            match = _level_vs_band_range(level_name, level, "lower_1p0sigma",
+                                         lower_1, "lower_2p5sigma", lower_2_5,
                                          tolerance)
+            if match is None and abs(level - lower_1_5) <= tolerance:
+                match = ((level + lower_1_5) / 2.0, (level_name, "lower_1p5sigma"))
             if match:
                 add("LONG", "LONG_MEAN_REVERSION", match[0], (poc, vwap_value), match[1])
-    elif macro_bias == 1 and regime == MarketRegime.IMBALANCE_BULL:
+    if macro_bias == 1 and regime == MarketRegime.IMBALANCE_BULL:
         for name, level in (("lower_1p0sigma", lower_1), ("vwap", vwap_value)):
             match = _pair_if_confluent("pdVAH", vah, name, level, tolerance)
             if match:
                 add("LONG", "LONG_TREND_PULLBACK", match[0], (upper_2,), match[1])
-    elif (macro_bias == -1 or (macro_bias == 0 and allow_range)) and regime == MarketRegime.BALANCE:
+    if (macro_bias == -1 or (macro_bias == 0 and allow_range)) and balance_window
         candidates = [("pdVAH", vah)]
         nearest_lvn = _nearest_lvn(lvns, vah, "above")
         if nearest_lvn is not None:
             candidates.append(("pdLVN", nearest_lvn))
         for level_name, level in candidates:
-            match = _level_vs_band_range(level_name, level, "upper_1p5sigma",
-                                         upper_1_5, "upper_2p5sigma", upper_2_5,
+            match = _level_vs_band_range(level_name, level, "upper_1p0sigma",
+                                         upper_1, "upper_2p5sigma", upper_2_5,
                                          tolerance)
+            if match is None and abs(level - upper_1_5) <= tolerance:
+                match = ((level + upper_1_5) / 2.0, (level_name, "upper_1p5sigma"))
             if match:
                 add("SHORT", "SHORT_MEAN_REVERSION", match[0], (poc, vwap_value), match[1])
-    elif macro_bias == -1 and regime == MarketRegime.IMBALANCE_BEAR:
+    if macro_bias == -1 and regime == MarketRegime.IMBALANCE_BEAR:
         for name, level in (("upper_1p0sigma", upper_1), ("vwap", vwap_value)):
             match = _pair_if_confluent("pdVAL", val, name, level, tolerance)
             if match:
@@ -209,14 +222,14 @@ def generate_regime_pois(
 
     # NEUTRAL_RANGE means range-only permission: allow both edges in balance,
     # but never allow trend-pullback POIs without a directional macro gate.
-    if macro_bias == 0 and allow_range and regime == MarketRegime.BALANCE:
+    if macro_bias == 0 and allow_range and balance_window
         candidates = [("pdVAH", vah)]
         nearest_lvn = _nearest_lvn(lvns, vah, "above")
         if nearest_lvn is not None:
             candidates.append(("pdLVN", nearest_lvn))
         for level_name, level in candidates:
             match = _level_vs_band_range(
-                level_name, level, "upper_1p5sigma", upper_1_5,
+                level_name, level, "upper_1p0sigma", upper_1,
                 "upper_2p5sigma", upper_2_5, tolerance
             )
             if match:

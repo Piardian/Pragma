@@ -26,7 +26,7 @@ class ClosedBarTests(unittest.TestCase):
         self.assertEqual(result.index[-1], pd.Timestamp("2026-10-15T12:01:00Z"))
 
     def test_m15_forming_bar_is_removed(self):
-        now = pd.Timestamp("2026-10-15T12:30:10Z")
+        now = pd.Timestamp("2026-10-15T12:29:59Z")
         bars = pd.DataFrame(
             {"close": [1.0, 2.0, 3.0]},
             index=pd.to_datetime([

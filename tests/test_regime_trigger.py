@@ -37,7 +37,7 @@ class RegimePOITests(unittest.TestCase):
         self.assertEqual(result.regime, MarketRegime.BALANCE)
         self.assertTrue(any(p.poi_type == "LONG_MEAN_REVERSION" for p in result.pois))
         poi = next(p for p in result.pois if p.poi_type == "LONG_MEAN_REVERSION")
-        self.assertAlmostEqual(poi.poi_high - poi.poi_low, 1.0)
+        self.assertAlmostEqual(poi.poi_high - poi.poi_low, 1.4)
         self.assertIn(100.0, poi.take_profits)
 
     def test_bull_imbalance_long_pullback(self):
@@ -79,6 +79,14 @@ class RegimePOITests(unittest.TestCase):
     def test_transition_when_price_and_vwap_disagree(self):
         self.assertEqual(classify_regime(103, self.profile, {"vwap": 99}),
                          MarketRegime.TRANSITION)
+
+    def test_atr_buffer_keeps_bull_pullback_regime_near_vah(self):
+        self.assertEqual(classify_regime(100.5, self.profile, {"vwap": 102}, 2.0),
+                         MarketRegime.IMBALANCE_BULL)
+
+    def test_atr_buffer_keeps_balance_regime_just_below_val_without_directional_vwap(self):
+        self.assertEqual(classify_regime(98.5, self.profile, {"vwap": 100}, 2.0),
+                         MarketRegime.BALANCE)
 
 
 class TriggerTests(unittest.TestCase):
@@ -131,6 +139,27 @@ class TriggerTests(unittest.TestCase):
                                   atr_14=2.0, take_profit=100.0)
         self.assertFalse(result.execute)
         self.assertEqual(result.reason, "LOW_RR")
+
+    def test_previous_candle_wick_counts_as_poi_touch(self):
+        bars = self.bars("LONG")
+        bars.iloc[-1, bars.columns.get_loc("low")] = 99.6
+        bars.iloc[-1, bars.columns.get_loc("high")] = 100.0
+        bars.iloc[-2, bars.columns.get_loc("low")] = 98.9
+        bars.iloc[-2, bars.columns.get_loc("high")] = 99.05
+        bars.iloc[-2, bars.columns.get_loc("tick_volume")] = 100.0
+        result = evaluate_trigger(bars, "LONG", 99.0, 99.1, atr_14=2.0,
+                                  take_profit=110.0)
+        self.assertTrue(result.metrics["poi_touched"])
+        self.assertTrue(result.metrics["volume_climax"])
+        self.assertNotEqual(result.reason, "OUTSIDE_POI")
+
+    def test_tp2_fallback_when_tp1_rr_is_too_low(self):
+        result = evaluate_trigger(self.bars("LONG"), "LONG", 98.0, 102.0,
+                                  atr_14=2.0, take_profit=[100.0, 110.0])
+        self.assertTrue(result.execute, result.reason)
+        self.assertTrue(result.metrics["target_fallback_to_tp2"])
+        self.assertEqual(result.take_profit_1, 110.0)
+        self.assertGreaterEqual(result.rr_ratio, 1.5)
 
     def test_vwap_engine_produces_1p5_sigma_bands(self):
         bars = pd.DataFrame({"high": [11.0, 12.0, 13.0],

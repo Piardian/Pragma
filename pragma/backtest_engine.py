@@ -338,6 +338,11 @@ def run_backtest(
         )
 
     vwap_engine = VWAPEngine()
+    # Vectorized cumulative VWAP is causal: each row depends only on that
+    # session's prefix, so precomputing it does not introduce future leakage.
+    vwap_input = m1.copy()
+    vwap_input["session"] = m1["session"]
+    vwap_all = vwap_engine.calculate(vwap_input, session_key="session")
     cost = float(spread_points) * float(point_size)
     trades: list[BacktestTrade] = []
     position: _OpenTrade | None = None
@@ -366,14 +371,13 @@ def run_backtest(
             continue
 
         # The active-session VWAP receives only M1 bars through this closed bar.
-        active_prefix = m1.iloc[:i + 1].loc[m1.iloc[:i + 1]["session"] == current_session]
-        if active_prefix.empty or active_prefix["tick_volume"].sum() <= 0:
+        latest_vwap = vwap_all.iloc[i]
+        if pd.isna(latest_vwap["vwap"]) or float(latest_vwap["cumulative_volume"]) <= 0:
             continue
-        vwap_frame = vwap_engine.calculate(active_prefix)
-        latest_vwap = vwap_frame.iloc[-1]
 
         # A M15 candle is eligible only after its entire 15-minute interval ends.
-        eligible_m15 = m15.loc[(m15_indices + pd.Timedelta(minutes=15)) <= decision_time]
+        eligible_cutoff = decision_time - pd.Timedelta(minutes=15)
+        eligible_m15 = m15.iloc[:m15.index.searchsorted(eligible_cutoff, side="right")]
         atr = _atr14(eligible_m15)
         if atr is None or i < 29:
             continue
@@ -381,13 +385,15 @@ def run_backtest(
         regime_decision = generate_regime_pois(
             macro_bias, profile, latest_vwap, price, atr, allow_range=allow_range
         )
+        if i >= len(m1) - 1:
+            continue
         for poi in regime_decision.pois:
             intersects = float(bar["low"]) <= poi.poi_high and float(bar["high"]) >= poi.poi_low
             if not intersects:
                 continue
             decision = evaluate_trigger(
-                m1.iloc[:i + 1], poi.direction, poi.poi_low, poi.poi_high,
-                atr, poi.take_profits,
+                m1.iloc[max(0, i - 29):i + 1], poi.direction,
+                poi.poi_low, poi.poi_high, atr, poi.take_profits,
             )
             if not decision.execute:
                 continue

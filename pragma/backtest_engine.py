@@ -1,0 +1,527 @@
+"""Causal walk-forward backtest engine for Pragma.
+
+All decisions are made after an M1 bar closes. Daily profiles use only the
+previous completed observed session; VWAP uses the active session prefix;
+M15 ATR uses only fully closed M15 bars. OHLC ambiguity is resolved
+conservatively: stop loss takes priority over targets.
+"""
+from __future__ import annotations
+
+import argparse
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import json
+import math
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from pragma.amt_engine import calculate_volume_profile
+from pragma.data.mt5_data import MT5DataClient, filter_closed_bars
+from pragma.macro_gate import MacroGate
+from pragma.regime_poi_engine import generate_regime_pois
+from pragma.trigger_engine import evaluate_trigger
+from pragma.vwap_engine import VWAPEngine
+
+
+@dataclass(frozen=True)
+class BacktestTrade:
+    symbol: str
+    direction: str
+    poi_type: str
+    regime: str
+    entry_time: str
+    exit_time: str
+    entry_price: float
+    initial_stop_loss: float
+    tp1: float
+    tp2: float
+    exit_reason: str
+    r_multiple: float
+    tp1_taken: bool
+
+
+@dataclass(frozen=True)
+class BacktestReport:
+    symbol: str
+    bars_processed: int
+    total_trades: int
+    win_rate: float
+    profit_factor: float
+    net_r: float
+    expectancy_r: float
+    max_drawdown_r: float
+    max_daily_drawdown_pct: float
+    max_total_drawdown_pct: float
+    trades_by_regime: dict[str, dict[str, float]]
+    trades_by_poi_type: dict[str, dict[str, float]]
+    spread_points: float
+    point_size: float
+    risk_per_trade_pct: float = 1.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class _OpenTrade:
+    symbol: str
+    direction: str
+    poi_type: str
+    regime: str
+    entry_time: pd.Timestamp
+    entry_price: float
+    initial_stop_loss: float
+    stop_loss: float
+    tp1: float
+    tp2: float
+    initial_risk: float
+    r_multiple: float = 0.0
+    tp1_taken: bool = False
+
+
+def _utc_index(frame: pd.DataFrame, name: str) -> pd.DataFrame:
+    if not isinstance(frame.index, pd.DatetimeIndex):
+        raise ValueError(f"{name} must have a DatetimeIndex")
+    out = frame.copy().sort_index()
+    idx = pd.DatetimeIndex(out.index)
+    if idx.tz is None:
+        idx = idx.tz_localize("UTC")
+    else:
+        idx = idx.tz_convert("UTC")
+    out.index = idx
+    out = out.loc[~out.index.duplicated(keep="last")]
+    required = {"open", "high", "low", "close", "tick_volume"}
+    missing = required.difference(out.columns)
+    if missing:
+        raise ValueError(f"{name} missing columns: {sorted(missing)}")
+    values = out[list(required)].to_numpy(dtype=float)
+    if not np.isfinite(values).all():
+        raise ValueError(f"{name} contains non-finite OHLCV values")
+    if (out["high"] < out["low"]).any():
+        raise ValueError(f"{name} has high below low")
+    if (out["tick_volume"] < 0).any():
+        raise ValueError(f"{name} has negative tick volume")
+    return out
+
+
+def _resample_m15(m1: pd.DataFrame) -> pd.DataFrame:
+    return m1[["open", "high", "low", "close", "tick_volume"]].resample(
+        "15min", label="left", closed="left"
+    ).agg({
+        "open": "first", "high": "max", "low": "min",
+        "close": "last", "tick_volume": "sum",
+    }).dropna()
+
+
+def _atr14(m15_closed: pd.DataFrame) -> float | None:
+    if len(m15_closed) < 15:
+        return None
+    previous_close = m15_closed["close"].shift(1)
+    true_range = pd.concat([
+        m15_closed["high"] - m15_closed["low"],
+        (m15_closed["high"] - previous_close).abs(),
+        (m15_closed["low"] - previous_close).abs(),
+    ], axis=1).max(axis=1)
+    value = true_range.rolling(14, min_periods=14).mean().iloc[-1]
+    if pd.isna(value) or not np.isfinite(float(value)) or float(value) <= 0:
+        return None
+    return float(value)
+
+
+def _profile_levels(day_bars: pd.DataFrame, bins: int) -> dict[str, Any]:
+    profile = calculate_volume_profile(day_bars, bins=bins)
+    return {
+        "pdPOC": profile.poc,
+        "pdVAH": profile.vah,
+        "pdVAL": profile.val,
+        "pdLVN": profile.lvn_levels,
+        "session": str(day_bars.index[0].date()),
+    }
+
+
+def _adverse_price(price: float, direction: str, entry: bool, cost: float) -> float:
+    """Apply a symmetric adverse execution cost in price units."""
+    is_buy = (direction == "LONG") if entry else (direction == "SHORT")
+    return float(price + cost if is_buy else price - cost)
+
+
+def _daily_group_stats(trades: list[BacktestTrade], field: str) -> dict[str, dict[str, float]]:
+    groups: dict[str, list[float]] = {}
+    for trade in trades:
+        key = str(getattr(trade, field))
+        groups.setdefault(key, []).append(trade.r_multiple)
+    result = {}
+    for key, values in sorted(groups.items()):
+        wins = sum(v for v in values if v > 0)
+        losses = -sum(v for v in values if v < 0)
+        result[key] = {
+            "trades": float(len(values)),
+            "win_rate": sum(v > 0 for v in values) / len(values),
+            "net_r": float(sum(values)),
+            "expectancy_r": float(sum(values) / len(values)),
+            "profit_factor": float(wins / losses) if losses else (math.inf if wins else 0.0),
+        }
+    return result
+
+
+def _make_report(symbol: str, bars_processed: int, trades: list[BacktestTrade],
+                 spread_points: float, point_size: float) -> BacktestReport:
+    values = [trade.r_multiple for trade in trades]
+    wins = sum(value for value in values if value > 0)
+    losses = -sum(value for value in values if value < 0)
+    equity_r = 0.0
+    peak_r = 0.0
+    max_dd_r = 0.0
+    equity_pct = 100.0
+    peak_pct = 100.0
+    max_total_dd_pct = 0.0
+    daily_start_pct: dict[str, float] = {}
+    daily_min_pct: dict[str, float] = {}
+    for trade in trades:
+        day = pd.Timestamp(trade.exit_time).date().isoformat()
+        daily_start_pct.setdefault(day, equity_pct)
+        equity_r += trade.r_multiple
+        equity_pct *= max(0.0, 1.0 + trade.r_multiple * 0.01)
+        peak_r = max(peak_r, equity_r)
+        max_dd_r = max(max_dd_r, peak_r - equity_r)
+        peak_pct = max(peak_pct, equity_pct)
+        max_total_dd_pct = max(max_total_dd_pct, peak_pct - equity_pct)
+        daily_min_pct[day] = min(daily_min_pct.get(day, daily_start_pct[day]), equity_pct)
+    max_daily_dd_pct = max(
+        (daily_start_pct[day] - daily_min_pct[day] for day in daily_start_pct),
+        default=0.0,
+    )
+    count = len(values)
+    return BacktestReport(
+        symbol=symbol,
+        bars_processed=bars_processed,
+        total_trades=count,
+        win_rate=sum(value > 0 for value in values) / count if count else 0.0,
+        profit_factor=float(wins / losses) if losses else (math.inf if wins else 0.0),
+        net_r=float(sum(values)),
+        expectancy_r=float(sum(values) / count) if count else 0.0,
+        max_drawdown_r=float(max_dd_r),
+        max_daily_drawdown_pct=float(max_daily_dd_pct),
+        max_total_drawdown_pct=float(max_total_dd_pct),
+        trades_by_regime=_daily_group_stats(trades, "regime"),
+        trades_by_poi_type=_daily_group_stats(trades, "poi_type"),
+        spread_points=float(spread_points),
+        point_size=float(point_size),
+    )
+
+
+def run_backtest(
+    m1_bars: pd.DataFrame,
+    *,
+    symbol: str = "XAUUSD",
+    macro_bias: int = 1,
+    m15_bars: pd.DataFrame | None = None,
+    profile_bins: int = 100,
+    spread_points: float = 0.0,
+    point_size: float = 0.01,
+    allow_range: bool = False,
+) -> BacktestReport:
+    """Simulate a single instrument without future-data leakage.
+
+    spread_points is multiplied by point_size to produce the adverse price
+    cost applied at entry and each exit. Only one position can be open at once.
+    """
+    if macro_bias not in (-1, 0, 1):
+        raise ValueError("macro_bias must be -1, 0, or +1")
+    if profile_bins < 2:
+        raise ValueError("profile_bins must be >= 2")
+    if not np.isfinite(spread_points) or spread_points < 0:
+        raise ValueError("spread_points must be finite and non-negative")
+    if not np.isfinite(point_size) or point_size <= 0:
+        raise ValueError("point_size must be finite and greater than zero")
+    m1 = _utc_index(m1_bars, "M1 bars")
+    if len(m1) < 300:
+        raise ValueError("At least 300 M1 bars are required for walk-forward simulation")
+    if m15_bars is None:
+        m15 = _resample_m15(m1)
+    else:
+        m15 = _utc_index(m15_bars, "M15 bars")
+    m15 = filter_closed_bars(m15, "M15", now=m1.index[-1] + pd.Timedelta(minutes=1))
+    if m1.index.to_series().diff().dropna().le(pd.Timedelta(0)).any():
+        raise ValueError("M1 timestamps must be strictly increasing")
+
+    m1 = m1.copy()
+    m1["session"] = m1.index.strftime("%Y-%m-%d")
+    session_names = list(dict.fromkeys(m1["session"].tolist()))
+    if len(session_names) < 2:
+        raise ValueError("At least two observed UTC sessions are required")
+    session_positions = {name: i for i, name in enumerate(session_names)}
+    # Profiles are computed once from completed prior sessions, never from the
+    # active session or any future session.
+    prior_profiles: dict[str, dict[str, Any]] = {}
+    for position in range(1, len(session_names)):
+        current_name = session_names[position]
+        previous_name = session_names[position - 1]
+        prior_profiles[current_name] = _profile_levels(
+            m1.loc[m1["session"] == previous_name], profile_bins
+        )
+
+    vwap_engine = VWAPEngine()
+    cost = float(spread_points) * float(point_size)
+    trades: list[BacktestTrade] = []
+    position: _OpenTrade | None = None
+    m15_indices = m15.index
+    processed = 0
+
+    for i in range(len(m1)):
+        timestamp = m1.index[i]
+        bar = m1.iloc[i]
+        decision_time = timestamp + pd.Timedelta(minutes=1)
+        processed += 1
+
+        # Manage an existing trade first, using only this fully closed candle.
+        if position is not None and timestamp > position.entry_time:
+            low, high = float(bar["low"]), float(bar["high"])
+            direction = position.direction
+            stop_hit = low <= position.stop_loss if direction == "LONG" else high >= position.stop_loss
+            if stop_hit:
+                exit_price = _adverse_price(position.stop_loss, direction, False, cost)
+                if position.tp1_taken:
+                    remaining_r = 0.5 * (
+                        (exit_price - position.entry_price) if direction == "LONG"
+                        else (position.entry_price - exit_price)
+                    ) / position.initial_risk
+                    position.r_multiple += remaining_r
+                    reason = "BREAKEVEN_STOP" if abs(position.stop_loss - position.entry_price) < 1e-12 else "STOP_LOSS"
+                else:
+                    position.r_multiple = (
+                        (exit_price - position.entry_price) if direction == "LONG"
+                        else (position.entry_price - exit_price)
+                    ) / position.initial_risk
+                    reason = "STOP_LOSS"
+                trades.append(BacktestTrade(
+                    position.symbol, position.direction, position.poi_type, position.regime,
+                    position.entry_time.isoformat(), timestamp.isoformat(),
+                    position.entry_price, position.initial_stop_loss, position.tp1, position.tp2,
+                    reason, float(position.r_multiple), position.tp1_taken,
+                ))
+                position = None
+            else:
+                tp1_hit = (high >= position.tp1) if direction == "LONG" else (low <= position.tp1)
+                tp2_hit = (high >= position.tp2) if direction == "LONG" else (low <= position.tp2)
+                if not position.tp1_taken and tp1_hit:
+                    tp1_exit = _adverse_price(position.tp1, direction, False, cost)
+                    position.r_multiple += 0.5 * (
+                        (tp1_exit - position.entry_price) if direction == "LONG"
+                        else (position.entry_price - tp1_exit)
+                    ) / position.initial_risk
+                    position.tp1_taken = True
+                    position.stop_loss = position.entry_price
+                    # OHLC cannot reveal target ordering. If both targets are
+                    # inside this candle, conservatively assume the remaining
+                    # half returns to breakeven whenever that level was crossed.
+                    breakeven_hit = low <= position.entry_price if direction == "LONG" else high >= position.entry_price
+                    if tp2_hit and not breakeven_hit:
+                        tp2_exit = _adverse_price(position.tp2, direction, False, cost)
+                        position.r_multiple += 0.5 * (
+                            (tp2_exit - position.entry_price) if direction == "LONG"
+                            else (position.entry_price - tp2_exit)
+                        ) / position.initial_risk
+                        exit_reason = "TP1_TP2_SAME_BAR"
+                    elif breakeven_hit:
+                        be_exit = _adverse_price(position.entry_price, direction, False, cost)
+                        position.r_multiple += 0.5 * (
+                            (be_exit - position.entry_price) if direction == "LONG"
+                            else (position.entry_price - be_exit)
+                        ) / position.initial_risk
+                        exit_reason = "TP1_THEN_BREAKEVEN_SAME_BAR"
+                    else:
+                        exit_reason = ""
+                    if exit_reason:
+                        trades.append(BacktestTrade(
+                            position.symbol, position.direction, position.poi_type, position.regime,
+                            position.entry_time.isoformat(), timestamp.isoformat(),
+                            position.entry_price, position.initial_stop_loss, position.tp1, position.tp2,
+                            exit_reason, float(position.r_multiple), True,
+                        ))
+                        position = None
+                elif position.tp1_taken and tp2_hit:
+                    tp2_exit = _adverse_price(position.tp2, direction, False, cost)
+                    position.r_multiple += 0.5 * (
+                        (tp2_exit - position.entry_price) if direction == "LONG"
+                        else (position.entry_price - tp2_exit)
+                    ) / position.initial_risk
+                    trades.append(BacktestTrade(
+                        position.symbol, position.direction, position.poi_type, position.regime,
+                        position.entry_time.isoformat(), timestamp.isoformat(),
+                        position.entry_price, position.initial_stop_loss, position.tp1, position.tp2,
+                        "TAKE_PROFIT_2", float(position.r_multiple), True,
+                    ))
+                    position = None
+
+        # Never open a second position while one remains open.
+        if position is not None:
+            continue
+        current_session = str(bar["session"])
+        profile = prior_profiles.get(current_session)
+        if profile is None:
+            continue
+
+        # The active-session VWAP receives only M1 bars through this closed bar.
+        active_prefix = m1.iloc[:i + 1].loc[m1.iloc[:i + 1]["session"] == current_session]
+        if active_prefix.empty or active_prefix["tick_volume"].sum() <= 0:
+            continue
+        vwap_frame = vwap_engine.calculate(active_prefix)
+        latest_vwap = vwap_frame.iloc[-1]
+
+        # A M15 candle is eligible only after its entire 15-minute interval ends.
+        eligible_m15 = m15.loc[(m15_indices + pd.Timedelta(minutes=15)) <= decision_time]
+        atr = _atr14(eligible_m15)
+        if atr is None or i < 29:
+            continue
+        price = float(bar["close"])
+        regime_decision = generate_regime_pois(
+            macro_bias, profile, latest_vwap, price, atr, allow_range=allow_range
+        )
+        for poi in regime_decision.pois:
+            intersects = float(bar["low"]) <= poi.poi_high and float(bar["high"]) >= poi.poi_low
+            if not intersects:
+                continue
+            decision = evaluate_trigger(
+                m1.iloc[:i + 1], poi.direction, poi.poi_low, poi.poi_high,
+                atr, poi.take_profits,
+            )
+            if not decision.execute:
+                continue
+            entry = _adverse_price(float(bar["close"]), poi.direction, True, cost)
+            stop = float(decision.stop_loss)
+            risk = abs(entry - stop)
+            tp1 = decision.take_profit_1
+            tp2 = decision.take_profit_2 if decision.take_profit_2 is not None else tp1
+            if tp1 is None or tp2 is None or risk <= 0:
+                continue
+            # Entry is at this candle's close; its high/low cannot close the
+            # newly opened trade. Management starts on the next M1 candle.
+            position = _OpenTrade(
+                symbol=symbol, direction=poi.direction, poi_type=poi.poi_type,
+                regime=regime_decision.regime.value, entry_time=timestamp,
+                entry_price=entry, initial_stop_loss=stop, stop_loss=stop,
+                tp1=float(tp1), tp2=float(tp2), initial_risk=risk,
+            )
+            break
+
+    # Mark any still-open position at the final closed close, conservatively
+    # without assuming future targets are hit.
+    if position is not None:
+        final_time = m1.index[-1]
+        final_close = _adverse_price(float(m1.iloc[-1]["close"]), position.direction, False, cost)
+        remaining_fraction = 0.5 if position.tp1_taken else 1.0
+        position.r_multiple += remaining_fraction * (
+            (final_close - position.entry_price) if position.direction == "LONG"
+            else (position.entry_price - final_close)
+        ) / position.initial_risk
+        trades.append(BacktestTrade(
+            position.symbol, position.direction, position.poi_type, position.regime,
+            position.entry_time.isoformat(), final_time.isoformat(),
+            position.entry_price, position.initial_stop_loss, position.tp1, position.tp2,
+            "END_OF_DATA", float(position.r_multiple), position.tp1_taken,
+        ))
+
+    return _make_report(symbol, processed, trades, spread_points, point_size)
+
+
+def _synthetic_bars(count: int, end_time: pd.Timestamp | None = None) -> pd.DataFrame:
+    if count < 300:
+        raise ValueError("--bars must be at least 300")
+    end = pd.Timestamp(end_time if end_time is not None else datetime.now(timezone.utc))
+    if end.tzinfo is None:
+        end = end.tz_localize("UTC")
+    else:
+        end = end.tz_convert("UTC")
+    last_closed_open = end.floor("min") - pd.Timedelta(minutes=2)
+    index = pd.date_range(end=last_closed_open, periods=count, freq="min", tz="UTC")
+    x = np.arange(count, dtype=float)
+    close = 2300.0 + 0.012 * x + 0.45 * np.sin(x / 8.0) + 0.18 * np.sin(x / 2.7)
+    open_ = np.r_[close[0] - 0.03, close[:-1]]
+    high = np.maximum(open_, close) + 0.08 + 0.02 * (1.0 + np.sin(x / 3.0))
+    low = np.minimum(open_, close) - 0.08 - 0.02 * (1.0 + np.cos(x / 4.0))
+    volume = 80.0 + 15.0 * (1.0 + np.sin(x / 5.0)) + (x.astype(int) % 11)
+    return pd.DataFrame({
+        "open": open_, "high": high, "low": low, "close": close,
+        "tick_volume": volume,
+    }, index=index)
+
+
+def _default_point_size(symbol: str) -> float:
+    name = symbol.upper()
+    if name.startswith(("XAU", "XAG", "BTC", "SOL")):
+        return 0.01
+    if "JPY" in name:
+        return 0.001
+    if name.startswith(("SPX", "NAS", "US30")):
+        return 0.1
+    return 0.00001
+
+
+def _print_report(report: BacktestReport) -> None:
+    print("\n=== PRAGMA WALK-FORWARD BACKTEST ===")
+    print(f"Symbol: {report.symbol} | Bars: {report.bars_processed} | Trades: {report.total_trades}")
+    print(f"Win rate: {report.win_rate:.2%} | Profit factor: {report.profit_factor:.3f}")
+    print(f"Net R: {report.net_r:.3f} | Expectancy: {report.expectancy_r:.4f} R/trade")
+    print(f"Max drawdown: {report.max_drawdown_r:.3f} R")
+    print(f"Max daily DD (1% risk): {report.max_daily_drawdown_pct:.2f}%")
+    print(f"Max total DD (1% risk): {report.max_total_drawdown_pct:.2f}%")
+    print(f"Costs: {report.spread_points:g} points x {report.point_size:g} price units")
+    for title, groups in (("By regime", report.trades_by_regime), ("By POI type", report.trades_by_poi_type)):
+        print(f"\n{title}:")
+        if not groups:
+            print("  No closed trades")
+        for name, values in groups.items():
+            print(f"  {name}: n={int(values['trades'])}, win={values['win_rate']:.1%}, "
+                  f"net={values['net_r']:.2f}R, exp={values['expectancy_r']:.3f}R, "
+                  f"PF={values['profit_factor']:.3f}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Causal Pragma walk-forward backtest")
+    parser.add_argument("--symbol", default="XAUUSD")
+    parser.add_argument("--bars", type=int, default=20000)
+    parser.add_argument("--macro-bias", type=int, choices=(-1, 0, 1), default=None)
+    parser.add_argument("--profile-bins", type=int, default=100)
+    parser.add_argument("--spread-points", type=float, default=0.0,
+                        help="Adverse spread/slippage cost in instrument points")
+    parser.add_argument("--point-size", type=float, default=None,
+                        help="Price units per point; inferred by symbol when omitted")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Use deterministic synthetic M1 data instead of MT5")
+    args = parser.parse_args(argv)
+    point_size = args.point_size if args.point_size is not None else _default_point_size(args.symbol)
+    if args.dry_run:
+        m1 = _synthetic_bars(args.bars)
+        m15 = _resample_m15(m1)
+        bias = 1 if args.macro_bias is None else args.macro_bias
+        allow_range = False
+    else:
+        if args.macro_bias is None:
+            gate = MacroGate().get_bias(args.symbol)
+            bias = int(gate.bias)
+            allow_range = getattr(gate, "gate", None) == "NEUTRAL_RANGE"
+        else:
+            bias = args.macro_bias
+            allow_range = False
+        with MT5DataClient() as client:
+            m1 = client.rates(args.symbol, "M1", args.bars)
+            m15 = client.rates(args.symbol, "M15", max(300, args.bars // 15 + 50))
+        now = pd.Timestamp.now(tz="UTC")
+        m1 = filter_closed_bars(m1, "M1", now=now)
+        m15 = filter_closed_bars(m15, "M15", now=now)
+    report = run_backtest(
+        m1, symbol=args.symbol, macro_bias=bias, m15_bars=m15,
+        profile_bins=args.profile_bins, spread_points=args.spread_points,
+        point_size=point_size, allow_range=allow_range,
+    )
+    _print_report(report)
+    print("\nJSON:")
+    print(json.dumps(report.to_dict(), indent=2, allow_nan=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

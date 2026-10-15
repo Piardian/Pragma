@@ -58,6 +58,7 @@ class BacktestReport:
     trades_by_poi_type: dict[str, dict[str, float]]
     spread_points: float
     point_size: float
+    funnel_counts: dict[str, int]
     risk_per_trade_pct: float = 1.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -118,6 +119,14 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
 
     tp1_hit = high >= position.tp1 if direction == "LONG" else low <= position.tp1
     tp2_hit = high >= position.tp2 if direction == "LONG" else low <= position.tp2
+    if (not position.tp1_taken and tp1_hit and tp2_hit
+            and abs(position.tp1 - position.tp2) < 1e-12):
+        target_exit = _adverse_price(position.tp2, direction, False, cost)
+        position.r_multiple = (
+            (target_exit - position.entry_price) if direction == "LONG"
+            else (position.entry_price - target_exit)
+        ) / position.initial_risk
+        return _trade_record(position, timestamp, "TAKE_PROFIT_2_SINGLE_TARGET")
     if not position.tp1_taken and tp1_hit:
         tp1_exit = _adverse_price(position.tp1, direction, False, cost)
         position.r_multiple += 0.5 * (
@@ -241,7 +250,8 @@ def _daily_group_stats(trades: list[BacktestTrade], field: str) -> dict[str, dic
 
 
 def _make_report(symbol: str, bars_processed: int, trades: list[BacktestTrade],
-                 spread_points: float, point_size: float) -> BacktestReport:
+                 spread_points: float, point_size: float,
+                 funnel_counts: dict[str, int] | None = None) -> BacktestReport:
     values = [trade.r_multiple for trade in trades]
     wins = sum(value for value in values if value > 0)
     losses = -sum(value for value in values if value < 0)
@@ -283,6 +293,7 @@ def _make_report(symbol: str, bars_processed: int, trades: list[BacktestTrade],
         trades_by_poi_type=_daily_group_stats(trades, "poi_type"),
         spread_points=float(spread_points),
         point_size=float(point_size),
+        funnel_counts=dict(funnel_counts or {}),
     )
 
 
@@ -347,6 +358,16 @@ def run_backtest(
     trades: list[BacktestTrade] = []
     position: _OpenTrade | None = None
     processed = 0
+    funnel_counts = {
+        "sessions_evaluated": len(prior_profiles),
+        "bars_with_active_poi": 0,
+        "bars_touched_poi": 0,
+        "passed_zscore": 0,
+        "passed_volume": 0,
+        "passed_rejection": 0,
+        "rejected_low_rr": 0,
+        "trades_opened": 0,
+    }
 
     for i in range(len(m1)):
         timestamp = m1.index[i]
@@ -361,9 +382,8 @@ def run_backtest(
                 trades.append(closed_trade)
                 position = None
 
-        # Never open a second position while one remains open.
-        if position is not None:
-            continue
+        # Keep diagnostics running while a trade is open, but block new entries.
+        can_enter = position is None
         current_session = str(bar["session"])
         profile = prior_profiles.get(current_session)
         if profile is None:
@@ -384,16 +404,35 @@ def run_backtest(
         regime_decision = generate_regime_pois(
             macro_bias, profile, latest_vwap, price, atr, allow_range=allow_range
         )
-        if i >= len(m1) - 1:
-            continue
+        if regime_decision.pois:
+            funnel_counts["bars_with_active_poi"] += 1
+        bar_touched = bar_z = bar_volume = bar_rejection = bar_low_rr = False
+        decisions = []
         for poi in regime_decision.pois:
-            intersects = float(bar["low"]) <= poi.poi_high and float(bar["high"]) >= poi.poi_low
-            if not intersects:
-                continue
             decision = evaluate_trigger(
                 m1.iloc[max(0, i - 29):i + 1], poi.direction,
                 poi.poi_low, poi.poi_high, atr, poi.take_profits,
             )
+            metrics = decision.metrics
+            if metrics.get("poi_touched"):
+                bar_touched = True
+                if metrics.get("z_condition"):
+                    bar_z = True
+                    if metrics.get("volume_climax"):
+                        bar_volume = True
+                        if metrics.get("rejection"):
+                            bar_rejection = True
+            if decision.reason == "LOW_RR":
+                bar_low_rr = True
+            decisions.append((poi, decision))
+        funnel_counts["bars_touched_poi"] += int(bar_touched)
+        funnel_counts["passed_zscore"] += int(bar_touched and bar_z)
+        funnel_counts["passed_volume"] += int(bar_touched and bar_z and bar_volume)
+        funnel_counts["passed_rejection"] += int(bar_touched and bar_z and bar_volume and bar_rejection)
+        funnel_counts["rejected_low_rr"] += int(bar_low_rr)
+        if not can_enter or i >= len(m1) - 1:
+            continue
+        for poi, decision in decisions:
             if not decision.execute:
                 continue
             entry = _adverse_price(float(bar["close"]), poi.direction, True, cost)
@@ -411,6 +450,7 @@ def run_backtest(
                 entry_price=entry, initial_stop_loss=stop, stop_loss=stop,
                 tp1=float(tp1), tp2=float(tp2), initial_risk=risk,
             )
+            funnel_counts["trades_opened"] += 1
             break
 
     # Mark any still-open position at the final closed close, conservatively
@@ -430,7 +470,7 @@ def run_backtest(
             "END_OF_DATA", float(position.r_multiple), position.tp1_taken,
         ))
 
-    return _make_report(symbol, processed, trades, spread_points, point_size)
+    return _make_report(symbol, processed, trades, spread_points, point_size, funnel_counts)
 
 
 def _synthetic_bars(count: int, end_time: pd.Timestamp | None = None) -> pd.DataFrame:
@@ -475,6 +515,9 @@ def _print_report(report: BacktestReport) -> None:
     print(f"Max daily DD (1% risk): {report.max_daily_drawdown_pct:.2f}%")
     print(f"Max total DD (1% risk): {report.max_total_drawdown_pct:.2f}%")
     print(f"Costs: {report.spread_points:g} points x {report.point_size:g} price units")
+    print("\\nFunnel diagnostics:")
+    for name, count in report.funnel_counts.items():
+        print(f"  {name}: {count}")
     for title, groups in (("By regime", report.trades_by_regime), ("By POI type", report.trades_by_poi_type)):
         print(f"\n{title}:")
         if not groups:

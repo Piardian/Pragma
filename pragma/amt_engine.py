@@ -1,14 +1,13 @@
-"""Auction Market Theory profile calculations using bar-level tick volume.
+"""Auction Market Theory profiles from MT5 bars or tick observations.
 
-Important: MT5 M1 bars do not reveal true volume-at-price. This engine assigns
-each bar's tick volume to its typical-price bin (H+L+C)/3. This approximation
-is explicit, deterministic, and suitable for research, not equivalent to
-exchange-traded footprint data.
+MT5 M1 tick_volume is activity count, not centralized traded volume. For bar
+profiles this engine spreads each bar's tick_volume equally across every price
+bin intersecting [low, high], conserving each bar's volume. It remains an
+approximation: OHLC bars do not reveal the true intrabar volume-at-price path.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -23,6 +22,30 @@ class VolumeProfile:
     total_volume: float
     value_area_fraction: float
     lvn_levels: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class PreviousSessionProfile:
+    """Completed prior session levels; pd* names are stable interface fields."""
+    session: object
+    pdPOC: float
+    pdVAH: float
+    pdVAL: float
+    pdLVN: tuple[float, ...]
+    profile: VolumeProfile
+
+
+@dataclass(frozen=True)
+class DevelopingProfile:
+    """Profile calculated only from the active session data supplied to it."""
+    session: object
+    profile: VolumeProfile
+
+
+@dataclass(frozen=True)
+class SessionProfiles:
+    previous: PreviousSessionProfile
+    developing: DevelopingProfile
 
 
 def _validate_bars(bars: pd.DataFrame) -> pd.DataFrame:
@@ -44,44 +67,13 @@ def _validate_bars(bars: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
-def calculate_volume_profile(
-    bars: pd.DataFrame,
-    bins: int = 100,
-    value_area_fraction: float = 0.70,
-    lvn_percentile: float = 20.0,
+def _build_profile(
+    volumes: np.ndarray,
+    edges: np.ndarray,
+    value_area_fraction: float,
+    lvn_percentile: float,
 ) -> VolumeProfile:
-    """Calculate POC, contiguous value area, and low-volume nodes.
-
-    Value area expands one adjacent price bin at a time from POC, selecting
-    the larger-volume adjacent bin at each step, until target volume is met.
-    Ties are resolved downward for deterministic results. VAH/VAL are the
-    upper/lower edges of the included bins.
-
-    LVNs are interior local minima whose volume is at or below the requested
-    percentile. They are levels, not claims about actual resting liquidity.
-    """
-    if not isinstance(bins, int) or bins < 2:
-        raise ValueError("bins must be an integer >= 2")
-    if not 0 < value_area_fraction <= 1:
-        raise ValueError("value_area_fraction must be in (0, 1]")
-    if not 0 <= lvn_percentile <= 100:
-        raise ValueError("lvn_percentile must be in [0, 100]")
-
-    frame = _validate_bars(bars)
-    typical = (frame["high"].to_numpy() + frame["low"].to_numpy()
-               + frame["close"].to_numpy()) / 3.0
-    volume = frame["tick_volume"].to_numpy(dtype=float)
-
-    low_edge = float(frame["low"].min())
-    high_edge = float(frame["high"].max())
-    if np.isclose(low_edge, high_edge):
-        # A non-zero bin width is needed for histogram edges.
-        pad = max(abs(low_edge) * 1e-9, np.finfo(float).eps * 16)
-        low_edge -= pad
-        high_edge += pad
-
-    volumes, edges = np.histogram(typical, bins=bins, range=(low_edge, high_edge),
-                                  weights=volume)
+    bins = len(volumes)
     centers = (edges[:-1] + edges[1:]) / 2.0
     total = float(volumes.sum())
     if total <= 0:
@@ -106,7 +98,6 @@ def calculate_volume_profile(
                  & (volumes[1:-1] <= volumes[2:])
                  & (volumes[1:-1] <= threshold))
     lvn_indices = np.flatnonzero(local_min) + 1
-
     hist = pd.DataFrame({
         "price_low": edges[:-1],
         "price_high": edges[1:],
@@ -126,9 +117,118 @@ def calculate_volume_profile(
     )
 
 
-class AMTEngine:
-    """Convenience class wrapper for profile configuration."""
+def calculate_volume_profile(
+    bars: pd.DataFrame,
+    bins: int = 100,
+    value_area_fraction: float = 0.70,
+    lvn_percentile: float = 20.0,
+) -> VolumeProfile:
+    """Build a bar-range-uniform profile and derive POC, VAH/VAL, and LVNs.
 
+    Each bar's tick volume is divided equally among all bins intersecting its
+    [low, high] range. A zero-range bar is assigned wholly to the containing
+    bin. The sum of histogram volume equals the sum of input bar volume
+    (subject only to floating-point rounding).
+
+    Value Area expands from POC toward the larger adjacent-volume bin until
+    the configured fraction is covered. This is not the same as one sigma.
+    """
+    if not isinstance(bins, int) or bins < 2:
+        raise ValueError("bins must be an integer >= 2")
+    if not 0 < value_area_fraction <= 1:
+        raise ValueError("value_area_fraction must be in (0, 1]")
+    if not 0 <= lvn_percentile <= 100:
+        raise ValueError("lvn_percentile must be in [0, 100]")
+
+    frame = _validate_bars(bars)
+    low_edge = float(frame["low"].min())
+    high_edge = float(frame["high"].max())
+    if np.isclose(low_edge, high_edge):
+        pad = max(abs(low_edge) * 1e-9, np.finfo(float).eps * 16)
+        low_edge -= pad
+        high_edge += pad
+    edges = np.linspace(low_edge, high_edge, bins + 1)
+    bar_lows = frame["low"].to_numpy()
+    bar_highs = frame["high"].to_numpy()
+    bar_volumes = frame["tick_volume"].to_numpy(dtype=float)
+
+    # Rows are bars, columns are bins. Include any bin intersecting [low, high].
+    intersects = ((bar_lows[:, None] < edges[1:][None, :])
+                  & (bar_highs[:, None] >= edges[:-1][None, :]))
+    zero_range = np.isclose(bar_lows, bar_highs)
+    if zero_range.any():
+        intersects[zero_range, :] = False
+        idx = np.searchsorted(edges, bar_lows[zero_range], side="right") - 1
+        idx = np.clip(idx, 0, bins - 1)
+        intersects[np.flatnonzero(zero_range), idx] = True
+
+    counts = intersects.sum(axis=1)
+    if (counts == 0).any():
+        raise ValueError("Could not assign one or more bars to price bins")
+    per_bin_volume = bar_volumes / counts
+    histogram_volumes = (intersects * per_bin_volume[:, None]).sum(axis=0)
+    return _build_profile(histogram_volumes, edges, value_area_fraction, lvn_percentile)
+
+
+def calculate_session_profiles(
+    bars: pd.DataFrame,
+    session_key: str,
+    as_of=None,
+    bins: int = 100,
+    value_area_fraction: float = 0.70,
+    lvn_percentile: float = 20.0,
+) -> SessionProfiles:
+    """Return completed previous-session levels and the active developing profile.
+
+    bars must include a session label column. If as_of is provided, rows later
+    than that timestamp are discarded before any calculation. For backtests,
+    call this at each decision timestamp or pass as_of. Supplying a full future
+    day without an as_of cutoff would itself introduce look-ahead.
+    The latest remaining session label is active; the preceding distinct label
+    is the completed previous session.
+    """
+    if session_key not in bars.columns:
+        raise ValueError(f"session_key column {session_key!r} not found")
+    if bars.empty:
+        raise ValueError("bars cannot be empty")
+    frame = bars.copy().sort_index()
+    if as_of is not None:
+        cutoff = pd.Timestamp(as_of)
+        if isinstance(frame.index, pd.DatetimeIndex):
+            if frame.index.tz is not None and cutoff.tzinfo is None:
+                cutoff = cutoff.tz_localize(frame.index.tz)
+            elif frame.index.tz is None and cutoff.tzinfo is not None:
+                cutoff = cutoff.tz_localize(None)
+        frame = frame.loc[frame.index <= cutoff]
+    if frame.empty:
+        raise ValueError("No bars exist at or before as_of")
+    if frame[session_key].isna().any():
+        raise ValueError("session labels cannot be null")
+
+    labels = frame[session_key].drop_duplicates().tolist()
+    if len(labels) < 2:
+        raise ValueError("At least two sessions are required")
+    active_label, previous_label = labels[-1], labels[-2]
+    engine_args = dict(bins=bins, value_area_fraction=value_area_fraction,
+                       lvn_percentile=lvn_percentile)
+    previous_profile = calculate_volume_profile(
+        frame.loc[frame[session_key] == previous_label], **engine_args
+    )
+    active_profile = calculate_volume_profile(
+        frame.loc[frame[session_key] == active_label], **engine_args
+    )
+    return SessionProfiles(
+        previous=PreviousSessionProfile(
+            session=previous_label, pdPOC=previous_profile.poc,
+            pdVAH=previous_profile.vah, pdVAL=previous_profile.val,
+            pdLVN=previous_profile.lvn_levels, profile=previous_profile,
+        ),
+        developing=DevelopingProfile(session=active_label, profile=active_profile),
+    )
+
+
+class AMTEngine:
+    """Configurable AMT profile and session-profile calculator."""
     def __init__(self, bins: int = 100, value_area_fraction: float = 0.70,
                  lvn_percentile: float = 20.0):
         self.bins = bins
@@ -137,7 +237,14 @@ class AMTEngine:
 
     def calculate(self, bars: pd.DataFrame) -> VolumeProfile:
         return calculate_volume_profile(
-            bars, bins=self.bins,
+            bars, bins=self.bins, value_area_fraction=self.value_area_fraction,
+            lvn_percentile=self.lvn_percentile,
+        )
+
+    def calculate_sessions(self, bars: pd.DataFrame, session_key: str,
+                           as_of=None) -> SessionProfiles:
+        return calculate_session_profiles(
+            bars, session_key=session_key, as_of=as_of, bins=self.bins,
             value_area_fraction=self.value_area_fraction,
             lvn_percentile=self.lvn_percentile,
         )

@@ -89,6 +89,56 @@ class ExecutionNotifier:
         self.deduplicator = deduplicator or SignalDeduplicator()
         self.timeout = timeout
 
+    def notify_poi(self, symbol: str, poi: Any, regime: Any,
+                   bar_time: Any) -> dict[str, Any]:
+        """Alert once per discovered POI zone, even before an M1 trigger fires."""
+        poi_type = _value(poi, "poi_type", "UNKNOWN")
+        direction = _value(poi, "direction", "UNKNOWN")
+        center = float(_value(poi, "center", 0.0))
+        digits = 2 if symbol.upper().startswith(("XAU", "XAG", "SPX", "NAS", "US30")) else 5
+        stable_zone = f"{direction}:{round(center, digits)}"
+        dedup_type = f"POI:{poi_type}"
+        if not self.deduplicator.claim(symbol, dedup_type, stable_zone):
+            return {"sent": False, "reason": "DUPLICATE_POI"}
+        regime_text = getattr(regime, "value", regime)
+        low = float(_value(poi, "poi_low", float("nan")))
+        high = float(_value(poi, "poi_high", float("nan")))
+        targets = _value(poi, "take_profits", ()) or ()
+        target_text = ", ".join(f"{float(target):.5f}" for target in targets) or "N/A"
+        time_text = bar_time.isoformat() if hasattr(bar_time, "isoformat") else str(bar_time)
+        message = "\n".join([
+            f"PRAGMA POI — {symbol}",
+            f"Yön: {direction} | Rejim: {regime_text}",
+            f"POI: {poi_type} [{low:.5f}, {high:.5f}]",
+            f"Merkez: {center:.5f}",
+            f"Hedefler: {target_text}",
+            f"Son kapanan M1: {time_text}",
+            "Not: Bu POI bildirimi tek başına işlem sinyali değildir.",
+        ])
+        if not self.bot_token or not self.chat_id:
+            logger.info("%s", message)
+            print(message)
+            return {"sent": True, "channel": "console", "reason": "TELEGRAM_NOT_CONFIGURED"}
+        endpoint = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        payload = urlencode({"chat_id": self.chat_id, "text": message}).encode("utf-8")
+        request = Request(endpoint, data=payload, headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "Pragma/1.0",
+        }, method="POST")
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                body = json.loads(response.read().decode("utf-8"))
+                if response.status < 200 or response.status >= 300 or not body.get("ok", False):
+                    self.deduplicator.forget(symbol, dedup_type, stable_zone)
+                    logger.error("Telegram API rejected POI alert: %s", body)
+                    return {"sent": False, "reason": "TELEGRAM_REJECTED", "response": body}
+            logger.info("Telegram POI alert delivered: %s %s %s", symbol, poi_type, stable_zone)
+            return {"sent": True, "channel": "telegram", "reason": "SENT_POI"}
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+            self.deduplicator.forget(symbol, dedup_type, stable_zone)
+            logger.exception("Telegram POI alert failed")
+            return {"sent": False, "reason": "TELEGRAM_ERROR", "error": str(exc)}
+
     def notify(self, symbol: str, poi: Any, decision: Any,
                regime: Any, bar_time: Any) -> dict[str, Any]:
         if not _value(decision, "execute", False):

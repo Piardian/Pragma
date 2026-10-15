@@ -102,7 +102,7 @@ def run_pipeline(
         clock = clock.tz_convert("UTC")
 
     if macro_bias is None:
-        macro_decision = MacroGate().get_bias()
+        macro_decision = MacroGate().get_bias(symbol)
         bias = int(macro_decision.bias)
         macro_source = macro_decision.source
         macro_reason = macro_decision.reason
@@ -201,7 +201,13 @@ def run_pipeline(
     return {
         "symbol": symbol,
         "dry_run": dry_run,
-        "macro": {"bias": bias, "source": macro_source, "reason": macro_reason},
+        "macro": {
+            "bias": bias,
+            "source": macro_source,
+            "reason": macro_reason,
+            "gate": getattr(macro_decision, "gate", None) if macro_bias is None else None,
+            "timestamp": getattr(macro_decision, "timestamp", None) if macro_bias is None else None,
+        },
         "bars": {
             "m1_closed_count": int(len(m1)),
             "m15_closed_count": int(len(m15)),

@@ -64,6 +64,16 @@ class RegimePOITests(unittest.TestCase):
         self.assertEqual(result.pois, ())
         self.assertEqual(result.reason, "NEUTRAL_MACRO")
 
+    def test_neutral_range_allows_balance_mean_reversion_only(self):
+        result = generate_regime_pois(
+            0, self.profile, self.vwap(), 100.0, 2.0, allow_range=True
+        )
+        self.assertEqual(result.regime, MarketRegime.BALANCE)
+        self.assertTrue(result.pois)
+        self.assertTrue(all(p.poi_type in (
+            "LONG_MEAN_REVERSION", "SHORT_MEAN_REVERSION"
+        ) for p in result.pois))
+
     def test_transition_when_price_and_vwap_disagree(self):
         self.assertEqual(classify_regime(103, self.profile, {"vwap": 99}),
                          MarketRegime.TRANSITION)

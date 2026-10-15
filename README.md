@@ -70,7 +70,12 @@ POI alerts are sent when a qualifying zone is found; execution-candidate alerts
 are separate and are sent only when the M1 trigger and risk filters pass. Both
 go to Telegram when `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are configured;
 otherwise they print to the console. Set those as Windows user environment
-variables (do not commit credentials), then open a new terminal.
+variables (do not commit credentials), then open a new terminal. In PowerShell,
+set them with your own values:
+```powershell
+setx TELEGRAM_BOT_TOKEN "YOUR_BOT_TOKEN"
+setx TELEGRAM_CHAT_ID "YOUR_CHAT_ID"
+```
 
 For automatic startup after Windows sign-in, run PowerShell from the project
 folder:

@@ -40,7 +40,7 @@ class RegimePOITests(unittest.TestCase):
             1, self.profile, self.vwap(), 100.0, 2.0, allow_mean_reversion=True
         )
         self.assertTrue(any(p.poi_type == "LONG_MEAN_REVERSION" for p in opted_in.pois))
-        poi = next(p for p in result.pois if p.poi_type == "LONG_MEAN_REVERSION")
+        poi = next(p for p in opted_in.pois if p.poi_type == "LONG_MEAN_REVERSION")
         self.assertAlmostEqual(poi.poi_high - poi.poi_low, 1.4)
         self.assertIn(100.0, poi.take_profits)
 

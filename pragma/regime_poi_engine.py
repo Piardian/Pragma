@@ -76,6 +76,31 @@ def _pair_if_confluent(a_name: str, a: float, b_name: str, b: float,
     return None
 
 
+def _level_vs_band_range(
+    level_name: str,
+    level: float,
+    band_low_name: str,
+    band_low: float,
+    band_high_name: str,
+    band_high: float,
+    tolerance: float,
+) -> tuple[float, tuple[str, str]] | None:
+    """Match a level to a band interval, including ATR tolerance outside it."""
+    low, high = sorted((band_low, band_high))
+    nearest = min(max(level, low), high)
+    if abs(level - nearest) > tolerance:
+        return None
+    if low <= level <= high:
+        # The structural level lies inside the VWAP band range; the overlap's
+        # center is that level itself (the intersection has zero width).
+        band_name = f"{band_low_name}..{band_high_name}"
+    elif nearest == low:
+        band_name = band_low_name
+    else:
+        band_name = band_high_name
+    return (level + nearest) / 2.0, (level_name, band_name)
+
+
 def classify_regime(current_price: float, previous_profile: Any,
                     vwap: Any) -> MarketRegime:
     """Apply the specified pdVA and VWAP-vs-pdPOC regime rules."""
@@ -106,10 +131,9 @@ def generate_regime_pois(
 
     `vwap` may be a mapping, a pandas Series (for example the latest row of
     `calculate_session_vwap`), or an object exposing the named attributes.
-    Previous-session LVNs may be supplied as `pdLVN` or `pd_lvn`.
-    Confluence is evaluated between explicit price levels with a <= 0.5*ATR
-    distance. For balance setups, the nearest relevant +/-1.5σ or +/-2.5σ band
-    endpoint is the VWAP-side level used to form the midpoint.
+    Previous-session LVNs may be supplied as `pdLVN` or `pd_lvn`. In balance
+    setups, confluence is checked against the full VWAP +/-1.5σ to +/-2.5σ
+    interval, not just its endpoints.
     """
     if macro_bias not in (-1, 0, 1):
         raise ValueError("macro_bias must be -1, 0, or +1")
@@ -166,14 +190,13 @@ def generate_regime_pois(
         candidates = [("pdVAL", val)]
         if below_lvn is not None:
             candidates.append(("pdLVN", below_lvn))
-        band_endpoints = [("lower_2p5sigma", lower_2_5), ("lower_1p5sigma", lower_1_5)]
         for level_name, level in candidates:
-            matches = [pair for name, endpoint in band_endpoints
-                       if (pair := _pair_if_confluent(level_name, level, name,
-                                                       endpoint, tolerance)) is not None]
-            if matches:
-                center, sources = min(matches, key=lambda item: abs(item[0] - level))
-                add("LONG", "LONG_MEAN_REVERSION", center, (poc, vwap_value), sources)
+            match = _level_vs_band_range(level_name, level,
+                                         "lower_2p5sigma", lower_2_5,
+                                         "lower_1p5sigma", lower_1_5,
+                                         tolerance)
+            if match:
+                add("LONG", "LONG_MEAN_REVERSION", match[0], (poc, vwap_value), match[1])
     elif macro_bias == 1 and regime == MarketRegime.IMBALANCE_BULL:
         for name, level in (("lower_1p0sigma", lower_1), ("vwap", vwap_value)):
             match = _pair_if_confluent("pdVAH", vah, name, level, tolerance)
@@ -184,14 +207,13 @@ def generate_regime_pois(
         candidates = [("pdVAH", vah)]
         if above_lvn is not None:
             candidates.append(("pdLVN", above_lvn))
-        band_endpoints = [("upper_1p5sigma", upper_1_5), ("upper_2p5sigma", upper_2_5)]
         for level_name, level in candidates:
-            matches = [pair for name, endpoint in band_endpoints
-                       if (pair := _pair_if_confluent(level_name, level, name,
-                                                       endpoint, tolerance)) is not None]
-            if matches:
-                center, sources = min(matches, key=lambda item: abs(item[0] - level))
-                add("SHORT", "SHORT_MEAN_REVERSION", center, (poc, vwap_value), sources)
+            match = _level_vs_band_range(level_name, level,
+                                         "upper_1p5sigma", upper_1_5,
+                                         "upper_2p5sigma", upper_2_5,
+                                         tolerance)
+            if match:
+                add("SHORT", "SHORT_MEAN_REVERSION", match[0], (poc, vwap_value), match[1])
     elif macro_bias == -1 and regime == MarketRegime.IMBALANCE_BEAR:
         for name, level in (("upper_1p0sigma", upper_1), ("vwap", vwap_value)):
             match = _pair_if_confluent("pdVAL", val, name, level, tolerance)

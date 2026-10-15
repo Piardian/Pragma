@@ -5,7 +5,7 @@ MetaTrader5 Python package. MT5 timestamps are UTC; returned indexes are UTC.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import pandas as pd
@@ -23,13 +23,46 @@ _TIMEFRAME_NAMES = {
     "H4": "TIMEFRAME_H4",
     "D1": "TIMEFRAME_D1",
 }
+_TIMEFRAME_DELTAS = {
+    "M1": timedelta(minutes=1), "M5": timedelta(minutes=5),
+    "M15": timedelta(minutes=15), "H1": timedelta(hours=1),
+    "H4": timedelta(hours=4), "D1": timedelta(days=1),
+}
+
+
+def filter_closed_bars(bars: pd.DataFrame, timeframe: str,
+                       now: datetime | pd.Timestamp | None = None) -> pd.DataFrame:
+    """Keep only bars whose full timeframe has elapsed.
+
+    MT5 bar timestamps denote bar opening time. This filter works on a
+    DatetimeIndex or a `time` column and accepts an injectable UTC clock for
+    deterministic tests. It never mutates the input frame.
+    """
+    key = timeframe.upper()
+    if key not in _TIMEFRAME_DELTAS:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+    if bars.empty:
+        return bars.copy()
+    if isinstance(bars.index, pd.DatetimeIndex):
+        times = pd.DatetimeIndex(bars.index)
+    elif "time" in bars.columns:
+        times = pd.DatetimeIndex(pd.to_datetime(bars["time"], utc=True))
+    else:
+        raise ValueError("bars must have a DatetimeIndex or a time column")
+    clock = pd.Timestamp(now if now is not None else datetime.now(timezone.utc))
+    if clock.tzinfo is None:
+        clock = clock.tz_localize("UTC")
+    else:
+        clock = clock.tz_convert("UTC")
+    utc_times = times.tz_localize("UTC") if times.tz is None else times.tz_convert("UTC")
+    keep = (utc_times + pd.Timedelta(_TIMEFRAME_DELTAS[key])) <= clock
+    return bars.loc[keep].copy()
 
 
 class MT5DataClient:
     """Small, explicit adapter around MT5 rates and ticks APIs."""
 
     def __init__(self, mt5_module=None):
-        # Injection keeps tests independent from an installed MT5 terminal.
         if mt5_module is None:
             try:
                 import MetaTrader5 as mt5_module  # type: ignore[no-redef]
@@ -66,15 +99,10 @@ class MT5DataClient:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
         return getattr(self.mt5, name)
 
-    def rates(self, symbol: str, timeframe: str = "M1", count: int = 1500) -> pd.DataFrame:
-        if count <= 0:
-            raise ValueError("count must be positive")
-        self.connect()
-        if not self.mt5.symbol_select(symbol, True):
-            raise MT5DataError(f"Cannot select symbol {symbol!r}: {self.mt5.last_error()}")
-        raw = self.mt5.copy_rates_from_pos(symbol, self._timeframe(timeframe), 0, count)
+    @staticmethod
+    def _normalize_rates(raw) -> pd.DataFrame:
         if raw is None or len(raw) == 0:
-            raise MT5DataError(f"No rates returned for {symbol}: {self.mt5.last_error()}")
+            raise MT5DataError("MT5 returned no rates")
         frame = pd.DataFrame(raw)
         if "time" not in frame:
             raise MT5DataError("MT5 rates response has no time field")
@@ -92,6 +120,15 @@ class MT5DataClient:
             raise MT5DataError("Invalid OHLC data: high is below low")
         return frame
 
+    def rates(self, symbol: str, timeframe: str = "M1", count: int = 1500) -> pd.DataFrame:
+        if count <= 0:
+            raise ValueError("count must be positive")
+        self.connect()
+        if not self.mt5.symbol_select(symbol, True):
+            raise MT5DataError(f"Cannot select symbol {symbol!r}: {self.mt5.last_error()}")
+        raw = self.mt5.copy_rates_from_pos(symbol, self._timeframe(timeframe), 0, count)
+        return self._normalize_rates(raw)
+
     def rates_from(self, symbol: str, timeframe: str, start: datetime,
                    count: int) -> pd.DataFrame:
         """Fetch rates ending at/around a UTC-aware datetime."""
@@ -103,12 +140,7 @@ class MT5DataClient:
         raw = self.mt5.copy_rates_from(
             symbol, self._timeframe(timeframe), start.astimezone(timezone.utc), count
         )
-        if raw is None or len(raw) == 0:
-            raise MT5DataError(f"No rates returned for {symbol}: {self.mt5.last_error()}")
-        frame = pd.DataFrame(raw)
-        frame["time"] = pd.to_datetime(frame["time"], unit="s", utc=True)
-        frame = frame.set_index("time").sort_index()
-        return frame[~frame.index.duplicated(keep="last")]
+        return self._normalize_rates(raw)
 
     def ticks_from(self, symbol: str, start: datetime, count: int = 10000) -> pd.DataFrame:
         """Fetch raw ticks from a UTC-aware start time."""
@@ -130,7 +162,6 @@ class MT5DataClient:
         frame["time"] = pd.to_datetime(frame[time_col], unit=unit, utc=True)
         return frame.set_index("time").sort_index()
 
-
     @staticmethod
     def tick_price_histogram(
         ticks: pd.DataFrame,
@@ -138,13 +169,7 @@ class MT5DataClient:
         price_field: str | None = None,
         volume_field: str | None = None,
     ) -> pd.DataFrame:
-        """Build a tick-price histogram from a previously fetched tick frame.
-
-        Price preference is last, then bid, then ask unless price_field is set.
-        Weight preference is volume_real, then volume, then one count per tick.
-        A per-tick count histogram is tick activity, not traded volume; many FX
-        and CFD feeds do not expose trade volume on ticks.
-        """
+        """Build a tick-price histogram; tick counts are activity, not trade volume."""
         import numpy as np
 
         if bins < 2:
@@ -159,7 +184,6 @@ class MT5DataClient:
             raise MT5DataError("Tick frame has no usable last/bid/ask price column")
         prices = pd.to_numeric(ticks[selected_price], errors="coerce")
         valid = prices.notna() & np.isfinite(prices) & (prices > 0)
-
         selected_volume = volume_field
         if selected_volume is None:
             selected_volume = next((name for name in ("volume_real", "volume")
@@ -173,7 +197,6 @@ class MT5DataClient:
             weights = weights.fillna(0).to_numpy(dtype=float)
         else:
             weights = np.ones(len(ticks), dtype=float)
-
         prices_array = prices.to_numpy(dtype=float)
         prices_array = prices_array[valid.to_numpy()]
         weights = weights[valid.to_numpy()]
@@ -187,8 +210,7 @@ class MT5DataClient:
             low, high = low - pad, high + pad
         hist, edges = np.histogram(prices_array, bins=bins, range=(low, high), weights=weights)
         return pd.DataFrame({
-            "price_low": edges[:-1],
-            "price_high": edges[1:],
+            "price_low": edges[:-1], "price_high": edges[1:],
             "price": (edges[:-1] + edges[1:]) / 2,
             "tick_weight": hist.astype(float),
         })

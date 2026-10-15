@@ -175,15 +175,32 @@ def generate_regime_pois(
     tolerance, half_width = 0.75 * atr, 0.35 * atr
     balance_window = val - 0.5 * atr <= price <= vah + 0.5 * atr
     pois: list[POIZone] = []
+    counter_long_locked = (
+        regime == MarketRegime.IMBALANCE_BEAR and price < val and vwap_value < poc
+    )
+    counter_short_locked = (
+        regime == MarketRegime.IMBALANCE_BULL and price > vah and vwap_value > poc
+    )
 
     def add(direction: str, poi_type: str, center: float,
             targets: tuple[float, ...], sources: tuple[str, ...]) -> None:
+        if direction == "LONG" and counter_long_locked:
+            return
+        if direction == "SHORT" and counter_short_locked:
+            return
         pois.append(POIZone(direction, poi_type, regime, center,
                             center - half_width, center + half_width,
                             targets, sources))
 
     lvns = _get(previous_profile, "pdLVN", "pd_lvn", default=()) or ()
-    if (macro_bias == 1 or (macro_bias == 0 and allow_range)) and balance_window:
+    long_mean_reversion_allowed = (
+        regime == MarketRegime.BALANCE and balance_window
+        and (
+            (macro_bias == 1 and vwap_value >= val)
+            or (macro_bias == 0 and allow_range)
+        )
+    )
+    if long_mean_reversion_allowed and not counter_long_locked:
         candidates = [("pdVAL", val)]
         nearest_lvn = _nearest_lvn(lvns, val, "below")
         if nearest_lvn is not None:
@@ -195,13 +212,33 @@ def generate_regime_pois(
             if match is None and abs(level - lower_1_5) <= tolerance:
                 match = ((level + lower_1_5) / 2.0, (level_name, "lower_1p5sigma"))
             if match:
-                add("LONG", "LONG_MEAN_REVERSION", match[0], (poc, vwap_value), match[1])
+                add("LONG", "LONG_MEAN_REVERSION", match[0],
+                    (lower_1, vwap_value, poc), match[1])
     if macro_bias == 1 and regime == MarketRegime.IMBALANCE_BULL:
         for name, level in (("lower_1p0sigma", lower_1), ("vwap", vwap_value)):
             match = _pair_if_confluent("pdVAH", vah, name, level, tolerance)
             if match:
-                add("LONG", "LONG_TREND_PULLBACK", match[0], (upper_2,), match[1])
-    if (macro_bias == -1 or (macro_bias == 0 and allow_range)) and balance_window:
+                add("LONG", "LONG_TREND_PULLBACK", match[0],
+                    (upper_1_5, upper_2_5), match[1])
+        # When price has broken above value and pulls back toward active VWAP
+        # or its lower 1-sigma band, create a level-centred continuation POI.
+        if price > vah and vwap_value > poc:
+            pullback_levels = [
+                (name, level) for name, level in
+                (("vwap", vwap_value), ("lower_1p0sigma", lower_1))
+                if abs(price - level) <= tolerance
+            ]
+            for name, level in pullback_levels:
+                add("LONG", "LONG_TREND_PULLBACK", level,
+                    (upper_1_5, upper_2_5), ("price_pullback", name))
+    short_mean_reversion_allowed = (
+        regime == MarketRegime.BALANCE and balance_window
+        and (
+            (macro_bias == -1 and vwap_value <= vah)
+            or (macro_bias == 0 and allow_range)
+        )
+    )
+    if short_mean_reversion_allowed and not counter_short_locked:
         candidates = [("pdVAH", vah)]
         nearest_lvn = _nearest_lvn(lvns, vah, "above")
         if nearest_lvn is not None:
@@ -213,12 +250,25 @@ def generate_regime_pois(
             if match is None and abs(level - upper_1_5) <= tolerance:
                 match = ((level + upper_1_5) / 2.0, (level_name, "upper_1p5sigma"))
             if match:
-                add("SHORT", "SHORT_MEAN_REVERSION", match[0], (poc, vwap_value), match[1])
+                add("SHORT", "SHORT_MEAN_REVERSION", match[0],
+                    (upper_1, vwap_value, poc), match[1])
     if macro_bias == -1 and regime == MarketRegime.IMBALANCE_BEAR:
         for name, level in (("upper_1p0sigma", upper_1), ("vwap", vwap_value)):
             match = _pair_if_confluent("pdVAL", val, name, level, tolerance)
             if match:
-                add("SHORT", "SHORT_TREND_PULLBACK", match[0], (lower_2,), match[1])
+                add("SHORT", "SHORT_TREND_PULLBACK", match[0],
+                    (lower_1_5, lower_2_5), match[1])
+        # Symmetric continuation setup: after a break below value, price
+        # retraces toward active VWAP or its upper 1-sigma band.
+        if price < val and vwap_value < poc:
+            pullback_levels = [
+                (name, level) for name, level in
+                (("vwap", vwap_value), ("upper_1p0sigma", upper_1))
+                if abs(price - level) <= tolerance
+            ]
+            for name, level in pullback_levels:
+                add("SHORT", "SHORT_TREND_PULLBACK", level,
+                    (lower_1_5, lower_2_5), ("price_pullback", name))
 
     # NEUTRAL_RANGE means range-only permission: allow both edges in balance,
     # but never allow trend-pullback POIs without a directional macro gate.
@@ -232,9 +282,9 @@ def generate_regime_pois(
                 level_name, level, "upper_1p0sigma", upper_1,
                 "upper_2p5sigma", upper_2_5, tolerance
             )
-            if match:
+            if match and not counter_short_locked:
                 add("SHORT", "SHORT_MEAN_REVERSION", match[0],
-                    (poc, vwap_value), match[1])
+                    (upper_1, vwap_value, poc), match[1])
 
     unique: list[POIZone] = []
     seen: set[tuple[str, str, float]] = set()

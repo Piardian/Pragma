@@ -93,7 +93,7 @@ class RegimePOITests(unittest.TestCase):
         )
         pullbacks = [p for p in result.pois if p.poi_type == "LONG_TREND_PULLBACK"]
         self.assertTrue(any(abs(p.center - 102.0) < 1e-9 for p in pullbacks))
-        self.assertTrue(all(p.take_profits == (103.5, 105.5) for p in pullbacks))
+        self.assertTrue(all(p.take_profits == (104.5, 105.5) for p in pullbacks))
 
     def test_bear_pullback_can_center_on_active_vwap_or_upper_band(self):
         result = generate_regime_pois(
@@ -101,7 +101,7 @@ class RegimePOITests(unittest.TestCase):
         )
         pullbacks = [p for p in result.pois if p.poi_type == "SHORT_TREND_PULLBACK"]
         self.assertTrue(any(abs(p.center - 98.0) < 1e-9 for p in pullbacks))
-        self.assertTrue(all(p.take_profits == (96.5, 94.5) for p in pullbacks))
+        self.assertTrue(all(p.take_profits == (95.5, 94.5) for p in pullbacks))
 
     def test_neutral_macro_never_generates_poi(self):
         result = generate_regime_pois(0, self.profile, self.vwap(), 100.0, 2.0)

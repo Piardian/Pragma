@@ -73,6 +73,8 @@ class RegimePOITests(unittest.TestCase):
         self.assertTrue(all(p.poi_type in (
             "LONG_MEAN_REVERSION", "SHORT_MEAN_REVERSION"
         ) for p in result.pois))
+        self.assertTrue(any(p.poi_type == "LONG_MEAN_REVERSION" for p in result.pois))
+        self.assertTrue(any(p.poi_type == "SHORT_MEAN_REVERSION" for p in result.pois))
 
     def test_transition_when_price_and_vwap_disagree(self):
         self.assertEqual(classify_regime(103, self.profile, {"vwap": 99}),

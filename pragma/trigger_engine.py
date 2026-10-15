@@ -49,16 +49,11 @@ def evaluate_trigger(
     take_profit: float | Sequence[float],
     *,
     min_rr: float = 1.5,
-    volume_multiplier: float = 1.8,
-    z_extreme: float = 2.0,
-    z_recovery: float = 1.5,
+    volume_multiplier: float = 1.35,
+    z_extreme: float = 1.75,
+    z_recovery: float = 1.65,
 ) -> TriggerDecision:
-    """Evaluate the latest supplied *closed* M1 bar against an active POI.
-
-    Caller must remove any forming bar before passing the series. At least 30
-    closed bars are required. R:R is always evaluated using the nearest valid
-    directional target (TP1), even when TP2 is much farther away.
-    """
+    """Evaluate closed M1 bars using POI touch, Z recovery and volume climax."""
     direction = direction.upper()
     if direction not in ("LONG", "SHORT"):
         raise ValueError("direction must be LONG or SHORT")
@@ -91,57 +86,65 @@ def evaluate_trigger(
     vol_sma_20 = bars["tick_volume"].rolling(20, min_periods=20).mean()
     last = bars.iloc[-1]
     last_z = z_score.iloc[-1]
+    previous_z = z_score.iloc[-2]
     baseline = float(vol_sma_20.iloc[-1]) if pd.notna(vol_sma_20.iloc[-1]) else float("nan")
 
+    last_three = bars.iloc[-3:]
+    touch_mask = (last_three["low"] <= poi_high) & (last_three["high"] >= poi_low)
+    poi_touched = bool(touch_mask.any())
+    last_five_z = z_score.iloc[-5:]
     if direction == "LONG":
-        extremes = z_score.iloc[-3:]
-        extreme_indices = list(extremes[extremes <= -abs(z_extreme)].index)
-        z_ok = bool(extreme_indices and pd.notna(last_z) and last_z >= -abs(z_recovery))
+        extreme_indices = list(last_five_z[last_five_z <= -abs(z_extreme)].index)
+        z_turn = bool(pd.notna(last_z) and pd.notna(previous_z) and last_z > previous_z)
+        z_ok = bool(extreme_indices and z_turn and last_z >= -abs(z_recovery))
         candle_range = float(last["high"] - last["low"])
         wick_ratio = (float(min(last["open"], last["close"]) - last["low"]) / candle_range
                       if candle_range > 0 else 0.0)
-        rejection = bool(last["close"] > last["open"] or wick_ratio >= 0.50)
+        rejection = bool(last["close"] > last["open"] or wick_ratio >= 0.40)
         stop_loss = poi_low - 0.5 * atr
-        z_rule = "Z<=-2 followed by recovery to Z>=-1.5"
+        z_rule = f"Z<=-{abs(z_extreme):g} in last 5; current Z rises and >=-{abs(z_recovery):g}"
     else:
-        extremes = z_score.iloc[-3:]
-        extreme_indices = list(extremes[extremes >= abs(z_extreme)].index)
-        z_ok = bool(extreme_indices and pd.notna(last_z) and last_z <= abs(z_recovery))
+        extreme_indices = list(last_five_z[last_five_z >= abs(z_extreme)].index)
+        z_turn = bool(pd.notna(last_z) and pd.notna(previous_z) and last_z < previous_z)
+        z_ok = bool(extreme_indices and z_turn and last_z <= abs(z_recovery))
         candle_range = float(last["high"] - last["low"])
         wick_ratio = (float(last["high"] - max(last["open"], last["close"])) / candle_range
                       if candle_range > 0 else 0.0)
-        rejection = bool(last["close"] < last["open"] or wick_ratio >= 0.50)
+        rejection = bool(last["close"] < last["open"] or wick_ratio >= 0.40)
         stop_loss = poi_high + 0.5 * atr
-        z_rule = "Z>=+2 followed by recovery to Z<=+1.5"
+        z_rule = f"Z>=+{abs(z_extreme):g} in last 5; current Z falls and <=+{abs(z_recovery):g}"
 
     entry = float(last["close"])
     tp1, tp2 = _select_targets(take_profit, direction, entry)
-    poi_touched = bool(
-        poi_low <= entry <= poi_high
-        or (float(last["low"]) <= poi_high and float(last["high"]) >= poi_low)
-    )
-
-    # Volume climax can be the latest bar or a preceding qualifying Z-extreme bar.
-    volume_candidates = [len(bars) - 1]
-    extreme_positions = {bars.index.get_loc(idx) for idx in extreme_indices}
-    volume_candidates.extend(sorted(i for i in extreme_positions if i < len(bars) - 1))
-    volume_candidates = list(dict.fromkeys(volume_candidates))
+    touched_positions = [len(bars) - 3 + offset
+                         for offset, touched in enumerate(touch_mask.to_numpy()) if touched]
     climax_pos = None
     volume_factor = float("nan")
-    if isfinite(baseline) and baseline > 0:
-        for pos in volume_candidates:
-            factor = float(bars["tick_volume"].iloc[pos]) / baseline
+    for pos in touched_positions:
+        baseline_at_touch = float(vol_sma_20.iloc[pos]) if pd.notna(vol_sma_20.iloc[pos]) else float("nan")
+        if isfinite(baseline_at_touch) and baseline_at_touch > 0:
+            factor = float(bars["tick_volume"].iloc[pos]) / baseline_at_touch
             if factor >= volume_multiplier:
                 climax_pos, volume_factor = pos, factor
                 break
     volume_ok = climax_pos is not None
 
     risk = abs(entry - stop_loss)
-    rr = abs(tp1 - entry) / risk if tp1 is not None and risk > 0 else None
+    rr_tp1 = abs(tp1 - entry) / risk if tp1 is not None and risk > 0 else None
+    rr_tp2 = abs(tp2 - entry) / risk if tp2 is not None and risk > 0 else None
+    target_fallback = bool(rr_tp1 is not None and rr_tp1 < min_rr
+                           and rr_tp2 is not None and rr_tp2 >= min_rr)
+    if target_fallback:
+        tp1 = tp2
+        rr_tp1 = rr_tp2
+    rr = rr_tp1
     metrics = {
         "poi_touched": poi_touched,
+        "poi_touch_positions": [int(p) for p in touched_positions],
         "z_score": float(last_z) if pd.notna(last_z) else None,
+        "z_score_previous": float(previous_z) if pd.notna(previous_z) else None,
         "z_condition": z_ok,
+        "z_turn": z_turn,
         "z_extreme_indices": [str(i) for i in extreme_indices],
         "z_rule": z_rule,
         "tick_volume": float(last["tick_volume"]),
@@ -151,6 +154,9 @@ def evaluate_trigger(
         "volume_climax_position": int(climax_pos) if climax_pos is not None else None,
         "rejection": rejection,
         "rr_ratio": rr,
+        "rr_tp1": rr_tp1,
+        "rr_tp2": rr_tp2,
+        "target_fallback_to_tp2": target_fallback,
         "min_rr": min_rr,
         "entry_price": entry,
         "stop_loss": stop_loss,
@@ -175,7 +181,6 @@ def evaluate_trigger(
     if rr is None or rr < min_rr:
         return decision(False, "LOW_RR")
     return decision(True, "EXECUTE")
-
 
 class TriggerEngine:
     def evaluate(self, m1_bars: pd.DataFrame, direction: str, poi_low: float,

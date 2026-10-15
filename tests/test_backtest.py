@@ -67,6 +67,17 @@ class TradePathTests(unittest.TestCase):
         self.assertAlmostEqual(final.r_multiple, -1.0)
         self.assertFalse(final.tp1_taken)
 
+    def test_same_tp1_tp2_target_closes_full_position(self):
+        position = self.position()
+        position.tp1 = position.tp2 = 110.0
+        final = be._manage_open_trade(
+            position, self.bar(99.0, 111.0),
+            pd.Timestamp("2026-10-01T10:01:00Z")
+        )
+        self.assertIsNotNone(final)
+        self.assertEqual(final.exit_reason, "TAKE_PROFIT_2_SINGLE_TARGET")
+        self.assertAlmostEqual(final.r_multiple, 2.0)
+
     def test_spread_cost_is_applied_adversely(self):
         position = self.position()
         final = be._manage_open_trade(
@@ -122,6 +133,8 @@ class WalkForwardTests(unittest.TestCase):
         self.assertEqual(report.total_trades, 0)
         self.assertEqual(report.net_r, 0.0)
         self.assertEqual(report.expectancy_r, 0.0)
+        self.assertIn("sessions_evaluated", report.funnel_counts)
+        self.assertEqual(report.funnel_counts["trades_opened"], 0)
 
 
 if __name__ == "__main__":

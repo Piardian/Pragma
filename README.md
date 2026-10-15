@@ -76,7 +76,7 @@ For automatic startup after Windows sign-in, run PowerShell from the project
 folder:
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\\install_startup_task.ps1
+.\install_startup_task.ps1
 ```
 
 The task starts at user logon, not before login. MetaTrader 5 must be installed,

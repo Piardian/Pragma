@@ -85,23 +85,35 @@ class BinanceCryptoTests(unittest.TestCase):
                 profile = get_instrument_profile(symbol)
                 self.assertEqual(profile.name, "CRYPTO_MOMENTUM")
                 self.assertEqual(profile.default_trigger_tf, "M15")
-                self.assertEqual(profile.active_hours_utc, (0, 24))
+                self.assertEqual(profile.active_hours_utc, (8, 22))
                 expected_tf = "M5" if symbol.upper().startswith(("SOL", "LINK")) else "M15"
                 self.assertEqual(default_trigger_tf_for_symbol(symbol), expected_tf)
-        self.assertEqual(CRYPTO_MOMENTUM.active_hours_utc, (0, 24))
+        self.assertEqual(CRYPTO_MOMENTUM.active_hours_utc, (8, 22))
 
-    def test_crypto_trigger_allows_early_utc_hours(self):
-        # Explicit 24/7 profile session should pass at 02:00 UTC.
-        idx = pd.date_range("2026-01-01T01:31:00Z", periods=30, freq="min")
+    def test_crypto_trigger_session_hours_utc(self):
+        # 02:00 UTC should be rejected outside (8, 22)
+        idx_night = pd.date_range("2026-01-01T01:31:00Z", periods=30, freq="min")
         close = 100 + 0.1 * np.sin(np.arange(30))
-        bars = pd.DataFrame({"open": close - .02, "high": close + .2,
-                             "low": close - .2, "close": close,
-                             "tick_volume": np.full(30, 10.0)}, index=idx)
-        bars.attrs["source"] = "binance"
-        result = evaluate_trigger(bars, "LONG", 99, 101, 1, 110,
-                                  session_hours_utc=CRYPTO_MOMENTUM.active_hours_utc)
-        self.assertTrue(result.metrics["session_allowed"])
-        self.assertEqual(result.metrics["session_hour_utc"], 2)
+        bars_night = pd.DataFrame({"open": close - .02, "high": close + .2,
+                                   "low": close - .2, "close": close,
+                                   "tick_volume": np.full(30, 10.0)}, index=idx_night)
+        bars_night.attrs["source"] = "binance"
+        res_night = evaluate_trigger(bars_night, "LONG", 99, 101, 1, 110,
+                                     session_hours_utc=CRYPTO_MOMENTUM.active_hours_utc)
+        self.assertFalse(res_night.metrics["session_allowed"])
+        self.assertEqual(res_night.metrics["session_hour_utc"], 2)
+        self.assertEqual(res_night.reason, "SESSION_HOURS")
+
+        # 14:00 UTC should be allowed within (8, 22)
+        idx_day = pd.date_range("2026-01-01T13:31:00Z", periods=30, freq="min")
+        bars_day = pd.DataFrame({"open": close - .02, "high": close + .2,
+                                 "low": close - .2, "close": close,
+                                 "tick_volume": np.full(30, 10.0)}, index=idx_day)
+        bars_day.attrs["source"] = "binance"
+        res_day = evaluate_trigger(bars_day, "LONG", 99, 101, 1, 110,
+                                   session_hours_utc=CRYPTO_MOMENTUM.active_hours_utc)
+        self.assertTrue(res_day.metrics["session_allowed"])
+        self.assertEqual(res_day.metrics["session_hour_utc"], 14)
 
     def test_btc_leader_filter_direction_rules(self):
         allows = binance_data.btc_leader_allows_direction
@@ -109,7 +121,10 @@ class BinanceCryptoTests(unittest.TestCase):
         self.assertTrue(allows("IMBALANCE_BEAR", "ETHUSDT", "SHORT"))
         self.assertFalse(allows("IMBALANCE_BULL", "SOLUSDT", "SHORT"))
         self.assertTrue(allows("IMBALANCE_BULL", "SOLUSDT", "LONG"))
-        self.assertTrue(allows("BALANCE", "SOLUSDT", "SHORT"))
+        # FAZ 13.2 A.1: Altcoin shorts strictly require IMBALANCE_BEAR; BALANCE must be vetoed
+        self.assertFalse(allows("BALANCE", "SOLUSDT", "SHORT"))
+        self.assertFalse(allows("RANGE", "SOLUSDT", "SHORT"))
+        self.assertFalse(allows(None, "SOLUSDT", "SHORT"))
         self.assertTrue(allows("IMBALANCE_BEAR", "BTCUSDT", "LONG"))
 
     def test_partial_cache_backfill_and_exact_count(self):

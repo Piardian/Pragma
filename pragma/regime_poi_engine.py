@@ -130,6 +130,8 @@ def generate_regime_pois(
     allow_mean_reversion: bool = False, allow_trend_pullback: bool = True,
     poi_atr_multiplier: float = 0.35, imbalance_vwap_poc_atr: float = 0.15,
     mean_reversion_confluence_atr: float = 0.75,
+    is_crypto: bool = False, is_btc: bool = False,
+    btc_leader_filter: bool = False, btc_leader_regime: str | None = None,
 ) -> RegimePOIDecision:
     """Classify regime and generate only spec-defined directional POIs.
 
@@ -235,7 +237,8 @@ def generate_regime_pois(
                     (lower_1, vwap_value, poc, upper_1, vah),
                     ("pdVAL", "direct_level_touch", "vwap_midpoint"))
     bull_imbalance_quality = vwap_value >= poc + (float(imbalance_vwap_poc_atr) * atr)
-    bear_imbalance_quality = vwap_value <= poc - (float(imbalance_vwap_poc_atr) * atr)
+    bear_imbalance_sep = 0.35 if is_crypto else float(imbalance_vwap_poc_atr)
+    bear_imbalance_quality = vwap_value <= poc - (bear_imbalance_sep * atr)
     if allow_trend_pullback and macro_bias == 1 and regime == MarketRegime.IMBALANCE_BULL and bull_imbalance_quality:
         for name, level in (("lower_1p0sigma", lower_1), ("vwap", vwap_value)):
             match = _pair_if_confluent("pdVAH", vah, name, level, tolerance)
@@ -278,7 +281,13 @@ def generate_regime_pois(
                 add("SHORT", "SHORT_MEAN_REVERSION", vah,
                     (upper_1, vwap_value, poc, lower_1, val),
                     ("pdVAH", "direct_level_touch", "vwap_midpoint"))
-    if allow_trend_pullback and macro_bias == -1 and regime == MarketRegime.IMBALANCE_BEAR and bear_imbalance_quality:
+    crypto_short_veto = False
+    if is_crypto and not is_btc and btc_leader_filter:
+        btc_reg = str(btc_leader_regime or "").upper() if btc_leader_regime is not None else None
+        if btc_reg != "IMBALANCE_BEAR":
+            crypto_short_veto = True
+
+    if allow_trend_pullback and macro_bias == -1 and regime == MarketRegime.IMBALANCE_BEAR and bear_imbalance_quality and not crypto_short_veto:
         for name, level in (("upper_1p0sigma", upper_1), ("vwap", vwap_value)):
             match = _pair_if_confluent("pdVAL", val, name, level, tolerance)
             if match:

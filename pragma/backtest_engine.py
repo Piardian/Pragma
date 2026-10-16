@@ -45,6 +45,8 @@ class BacktestTrade:
     exit_reason: str
     r_multiple: float
     tp1_taken: bool
+    funding_events: int = 0
+    funding_cost_r: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,9 @@ class BacktestReport:
     instrument_profile: str = "MOMENTUM_TREND"
     risk_per_trade_pct: float = 1.0
     trigger_tf: str = "M1"
+    trades: list[dict[str, Any]] | None = None
+    funding_events_total: int = 0
+    funding_cost_r_total: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -88,8 +93,11 @@ class _OpenTrade:
     initial_risk: float
     r_multiple: float = 0.0
     tp1_taken: bool = False
+    tp1_time: pd.Timestamp | None = None
     tp1_close_pct: float = 0.50
     be_offset_r: float | None = 0.0
+    funding_events: int = 0
+    funding_cost_r: float = 0.0
 
 
 def _trade_record(position: _OpenTrade, timestamp: pd.Timestamp,
@@ -99,11 +107,46 @@ def _trade_record(position: _OpenTrade, timestamp: pd.Timestamp,
         position.entry_time.isoformat(), timestamp.isoformat(),
         position.entry_price, position.initial_stop_loss, position.tp1, position.tp2,
         reason, float(position.r_multiple), position.tp1_taken,
+        position.funding_events, float(position.funding_cost_r),
     )
 
 
+def _count_funding_events(entry_time: pd.Timestamp, exit_time: pd.Timestamp) -> list[pd.Timestamp]:
+    """Find all 00:00, 08:00, 16:00 UTC funding timestamps strictly in (entry_time, exit_time]."""
+    if exit_time <= entry_time:
+        return []
+    start_floor = entry_time.floor("8h")
+    events = []
+    current = start_floor
+    while current <= exit_time + pd.Timedelta(hours=8):
+        if current.hour in (0, 8, 16) and current.minute == 0 and current.second == 0:
+            if entry_time < current <= exit_time:
+                events.append(current)
+        current += pd.Timedelta(hours=8)
+    return events
+
+
+def _apply_funding(position: _OpenTrade, exit_time: pd.Timestamp) -> None:
+    events = _count_funding_events(position.entry_time, exit_time)
+    if not events or position.initial_risk <= 0:
+        return
+    total_funding_r = 0.0
+    for event in events:
+        is_after_tp1 = position.tp1_taken and position.tp1_time is not None and event >= position.tp1_time
+        fraction = (1.0 - position.tp1_close_pct) if is_after_tp1 else 1.0
+        notional = fraction * position.entry_price
+        event_cost_price = notional * 0.0001  # 0.01%
+        delta_r = event_cost_price / position.initial_risk
+        total_funding_r += delta_r
+    position.funding_events = len(events)
+    position.funding_cost_r = total_funding_r
+    position.r_multiple -= total_funding_r
+
+
 def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
-                       timestamp: pd.Timestamp, cost: float = 0.0) -> BacktestTrade | None:
+                       timestamp: pd.Timestamp, cost: float = 0.0,
+                       cost_pct: float = 0.0,
+                       apply_funding: bool = False) -> BacktestTrade | None:
     """Advance one subsequent closed candle; return a record only when flat."""
     if timestamp <= position.entry_time:
         return None
@@ -111,7 +154,7 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
     direction = position.direction
     stop_hit = low <= position.stop_loss if direction == "LONG" else high >= position.stop_loss
     if stop_hit:
-        exit_price = _adverse_price(position.stop_loss, direction, False, cost)
+        exit_price = _adverse_price(position.stop_loss, direction, False, cost, cost_pct)
         if position.tp1_taken:
             remaining_r = (1.0 - position.tp1_close_pct) * (
                 (exit_price - position.entry_price) if direction == "LONG"
@@ -125,34 +168,41 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
                 else (position.entry_price - exit_price)
             ) / position.initial_risk
             reason = "STOP_LOSS"
+        if apply_funding:
+            _apply_funding(position, timestamp)
         return _trade_record(position, timestamp, reason)
 
     tp1_hit = high >= position.tp1 if direction == "LONG" else low <= position.tp1
     tp2_hit = high >= position.tp2 if direction == "LONG" else low <= position.tp2
     if (not position.tp1_taken and tp1_hit and tp2_hit
             and abs(position.tp1 - position.tp2) < 1e-12):
-        target_exit = _adverse_price(position.tp2, direction, False, cost)
+        target_exit = _adverse_price(position.tp2, direction, False, cost, cost_pct)
         position.r_multiple = (
             (target_exit - position.entry_price) if direction == "LONG"
             else (position.entry_price - target_exit)
         ) / position.initial_risk
+        if apply_funding:
+            _apply_funding(position, timestamp)
         return _trade_record(position, timestamp, "TAKE_PROFIT_2_SINGLE_TARGET")
     if not position.tp1_taken and tp1_hit:
         if position.tp1_close_pct <= 0.0:
             if tp2_hit:
-                target_exit = _adverse_price(position.tp2, direction, False, cost)
+                target_exit = _adverse_price(position.tp2, direction, False, cost, cost_pct)
                 position.r_multiple = (
                     (target_exit - position.entry_price) if direction == "LONG"
                     else (position.entry_price - target_exit)
                 ) / position.initial_risk
+                if apply_funding:
+                    _apply_funding(position, timestamp)
                 return _trade_record(position, timestamp, "TAKE_PROFIT_2")
             return None
-        tp1_exit = _adverse_price(position.tp1, direction, False, cost)
+        tp1_exit = _adverse_price(position.tp1, direction, False, cost, cost_pct)
         position.r_multiple += position.tp1_close_pct * (
             (tp1_exit - position.entry_price) if direction == "LONG"
             else (position.entry_price - tp1_exit)
         ) / position.initial_risk
         position.tp1_taken = True
+        position.tp1_time = timestamp
         if position.be_offset_r is not None:
             offset = position.be_offset_r * position.initial_risk
             position.stop_loss = position.entry_price + offset if direction == "LONG" else position.entry_price - offset
@@ -163,27 +213,33 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
             else high >= position.stop_loss
         )
         if tp2_hit and not breakeven_hit:
-            tp2_exit = _adverse_price(position.tp2, direction, False, cost)
+            tp2_exit = _adverse_price(position.tp2, direction, False, cost, cost_pct)
             position.r_multiple += (1.0 - position.tp1_close_pct) * (
                 (tp2_exit - position.entry_price) if direction == "LONG"
                 else (position.entry_price - tp2_exit)
             ) / position.initial_risk
+            if apply_funding:
+                _apply_funding(position, timestamp)
             return _trade_record(position, timestamp, "TP1_TP2_SAME_BAR")
         if breakeven_hit:
-            be_exit = _adverse_price(position.entry_price, direction, False, cost)
+            be_exit = _adverse_price(position.entry_price, direction, False, cost, cost_pct)
             position.r_multiple += (1.0 - position.tp1_close_pct) * (
                 (be_exit - position.entry_price) if direction == "LONG"
                 else (position.entry_price - be_exit)
             ) / position.initial_risk
+            if apply_funding:
+                _apply_funding(position, timestamp)
             return _trade_record(position, timestamp, "TP1_THEN_BREAKEVEN_SAME_BAR")
         return None
 
     if position.tp1_taken and tp2_hit:
-        tp2_exit = _adverse_price(position.tp2, direction, False, cost)
+        tp2_exit = _adverse_price(position.tp2, direction, False, cost, cost_pct)
         position.r_multiple += (1.0 - position.tp1_close_pct) * (
             (tp2_exit - position.entry_price) if direction == "LONG"
             else (position.entry_price - tp2_exit)
         ) / position.initial_risk
+        if apply_funding:
+            _apply_funding(position, timestamp)
         return _trade_record(position, timestamp, "TAKE_PROFIT_2")
     return None
 
@@ -286,10 +342,12 @@ def _profile_levels(day_bars: pd.DataFrame, bins: int) -> dict[str, Any]:
     }
 
 
-def _adverse_price(price: float, direction: str, entry: bool, cost: float) -> float:
-    """Apply a symmetric adverse execution cost in price units."""
+def _adverse_price(price: float, direction: str, entry: bool, cost: float = 0.0,
+                   cost_pct: float = 0.0) -> float:
+    """Apply a symmetric adverse execution cost in price units or percentage."""
     is_buy = (direction == "LONG") if entry else (direction == "SHORT")
-    return float(price + cost if is_buy else price - cost)
+    effective_cost = cost + (price * cost_pct)
+    return float(price + effective_cost if is_buy else price - effective_cost)
 
 
 def _daily_group_stats(trades: list[BacktestTrade], field: str) -> dict[str, dict[str, float]]:
@@ -347,6 +405,8 @@ def _make_report(symbol: str, bars_processed: int, trades: list[BacktestTrade],
         default=0.0,
     )
     count = len(values)
+    funding_events_total = sum(t.funding_events for t in trades)
+    funding_cost_r_total = sum(t.funding_cost_r for t in trades)
     return BacktestReport(
         symbol=symbol,
         bars_processed=bars_processed,
@@ -366,6 +426,9 @@ def _make_report(symbol: str, bars_processed: int, trades: list[BacktestTrade],
         funnel_counts=dict(funnel_counts or {}),
         instrument_profile=instrument_profile,
         trigger_tf=trigger_tf,
+        funding_events_total=funding_events_total,
+        funding_cost_r_total=funding_cost_r_total,
+        trades=[asdict(t) for t in trades],
     )
 
 
@@ -378,6 +441,8 @@ def run_backtest(
     profile_bins: int = 100,
     spread_points: float = 0.0,
     point_size: float = 0.01,
+    cost_pct: float | None = None,
+    apply_funding: bool | None = None,
     allow_range: bool = False,
     allow_mean_reversion: bool | None = None,
     disable_trend_pullback: bool = False,
@@ -387,7 +452,7 @@ def run_backtest(
     btc_regimes: dict[pd.Timestamp, str] | None = None,
     out_regimes: dict[pd.Timestamp, str] | None = None,
     session_hours_utc: tuple[int, int] | None = None,
-    filter_low_volume_days: bool = False,
+    filter_low_volume_days: bool | None = None,
     min_daily_volume_ratio: float = 0.70,
 ) -> BacktestReport:
     """Simulate a single instrument without future-data leakage.
@@ -397,6 +462,13 @@ def run_backtest(
     """
     instrument_profile = get_instrument_profile(symbol)
     trigger_tf = normalize_trigger_tf(trigger_tf or default_trigger_tf_for_symbol(symbol))
+    is_crypto = (instrument_profile.name == "CRYPTO_MOMENTUM") or symbol.upper().endswith("USDT")
+    is_btc = symbol.upper() in ("BTCUSDT", "BTC", "BTCUSD")
+    effective_cost_pct = 0.0004 if (cost_pct is None and is_crypto) else (float(cost_pct) if cost_pct is not None else 0.0)
+    effective_apply_funding = is_crypto if apply_funding is None else bool(apply_funding)
+    effective_filter_low_volume = (instrument_profile.name == "CRYPTO_MOMENTUM") if filter_low_volume_days is None else bool(filter_low_volume_days)
+    effective_session_hours = session_hours_utc if session_hours_utc is not None else instrument_profile.active_hours_utc
+
     effective_allow_mean_reversion = (
         instrument_profile.allow_mean_reversion
         if allow_mean_reversion is None else bool(allow_mean_reversion)
@@ -448,7 +520,7 @@ def run_backtest(
         )
 
     low_volume_sessions: dict[str, bool] = {}
-    if filter_low_volume_days:
+    if effective_filter_low_volume:
         session_vols = {s: float(m1.loc[m1["session"] == s, "tick_volume"].sum()) for s in session_names}
         for pos in range(len(session_names)):
             curr_name = session_names[pos]
@@ -498,7 +570,7 @@ def run_backtest(
 
         # Manage an existing trade first, using only this fully closed candle.
         if position is not None:
-            closed_trade = _manage_open_trade(position, bar, timestamp, cost)
+            closed_trade = _manage_open_trade(position, bar, timestamp, cost, effective_cost_pct, effective_apply_funding)
             if closed_trade is not None:
                 trades.append(closed_trade)
                 position = None
@@ -515,7 +587,7 @@ def run_backtest(
         # Keep diagnostics running while a trade is open, but block new entries.
         can_enter = position is None
         current_session = str(bar["session"])
-        if filter_low_volume_days and low_volume_sessions.get(current_session, False):
+        if effective_filter_low_volume and low_volume_sessions.get(current_session, False):
             funnel_counts["rejected_low_volume_day"] += 1
             continue
         profile = prior_profiles.get(current_session)
@@ -536,6 +608,7 @@ def run_backtest(
         if pd.isna(atr) or not np.isfinite(atr) or atr <= 0:
             continue
         price = float(bar["close"])
+        btc_reg = btc_regimes.get(timestamp) if btc_regimes is not None else None
         regime_decision = generate_regime_pois(
             macro_bias, profile, latest_vwap, price, atr,
             allow_range=allow_range,
@@ -544,6 +617,10 @@ def run_backtest(
             poi_atr_multiplier=instrument_profile.poi_atr_multiplier,
             imbalance_vwap_poc_atr=instrument_profile.imbalance_vwap_poc_atr,
             mean_reversion_confluence_atr=instrument_profile.mean_reversion_confluence_atr,
+            is_crypto=is_crypto,
+            is_btc=is_btc,
+            btc_leader_filter=bool(btc_regimes is not None),
+            btc_leader_regime=btc_reg,
         )
         if out_regimes is not None:
             out_regimes[timestamp] = regime_decision.regime.value
@@ -558,7 +635,7 @@ def run_backtest(
                 poi_type=poi.poi_type, center_price=poi.center, cost_price=cost,
                 sl_atr_buffer=instrument_profile.sl_atr_buffer,
                 min_spread_to_sl_ratio=instrument_profile.min_spread_to_sl_ratio,
-                session_hours_utc=session_hours_utc,
+                session_hours_utc=effective_session_hours,
             )
             metrics = decision.metrics
             if metrics.get("poi_touched"):
@@ -588,9 +665,9 @@ def run_backtest(
                 continue
             if btc_regimes is not None and symbol != "BTCUSDT":
                 btc_reg = btc_regimes.get(timestamp)
-                if btc_reg and not btc_leader_allows_direction(btc_reg, symbol, poi.direction):
+                if not btc_leader_allows_direction(btc_reg, symbol, poi.direction):
                     continue
-            entry = _adverse_price(float(bar["close"]), poi.direction, True, cost)
+            entry = _adverse_price(float(bar["close"]), poi.direction, True, cost, effective_cost_pct)
             stop = float(decision.stop_loss)
             risk = abs(entry - stop)
             tp1 = decision.take_profit_1
@@ -613,17 +690,20 @@ def run_backtest(
     # without assuming future targets are hit.
     if position is not None:
         final_time = m1.index[-1]
-        final_close = _adverse_price(float(m1.iloc[-1]["close"]), position.direction, False, cost)
+        final_close = _adverse_price(float(m1.iloc[-1]["close"]), position.direction, False, cost, effective_cost_pct)
         remaining_fraction = (1.0 - position.tp1_close_pct) if position.tp1_taken else 1.0
         position.r_multiple += remaining_fraction * (
             (final_close - position.entry_price) if position.direction == "LONG"
             else (position.entry_price - final_close)
         ) / position.initial_risk
+        if effective_apply_funding:
+            _apply_funding(position, final_time)
         trades.append(BacktestTrade(
             position.symbol, position.direction, position.poi_type, position.regime,
             position.entry_time.isoformat(), final_time.isoformat(),
             position.entry_price, position.initial_stop_loss, position.tp1, position.tp2,
             "END_OF_DATA", float(position.r_multiple), position.tp1_taken,
+            position.funding_events, float(position.funding_cost_r),
         ))
 
     return _make_report(
@@ -757,7 +837,8 @@ def main(argv: list[str] | None = None) -> int:
                 m15.attrs["source"] = "binance"
                 bias = args.macro_bias if args.macro_bias is not None else "auto"
                 crypto_point = args.point_size if args.point_size is not None else 0.01
-                effective_spread = max(args.spread_points, float(m1["close"].iloc[-1]) * 0.0004 / crypto_point)
+                effective_spread = args.spread_points
+                effective_cost_pct = 0.0004
                 for tf in timeframes:
                     sys.stderr.write(f"[PHASE12-MATRIX] [{s_idx}/{total_symbols}] Running {crypto_symbol} {tf} ({len(m1)} closed M1 bars)...\n")
                     sys.stderr.flush()
@@ -765,13 +846,15 @@ def main(argv: list[str] | None = None) -> int:
                     report = run_backtest(
                         m1, symbol=crypto_symbol, macro_bias=bias, m15_bars=m15,
                         profile_bins=args.profile_bins, spread_points=effective_spread, point_size=crypto_point,
+                        cost_pct=effective_cost_pct,
+                        apply_funding=True,
                         allow_mean_reversion=True if args.allow_mean_reversion else None,
                         disable_trend_pullback=args.disable_trend_pullback, trigger_tf=tf,
                         tp1_close_pct=args.tp1_close_pct, be_offset_r=None if args.no_breakeven else args.be_offset_r,
                         btc_regimes=btc_regimes if args.btc_leader_filter else None,
                         out_regimes=symbol_regimes,
                         session_hours_utc=session_hours,
-                        filter_low_volume_days=args.filter_low_volume_days,
+                        filter_low_volume_days=args.filter_low_volume_days if args.filter_low_volume_days else None,
                         min_daily_volume_ratio=args.min_daily_volume_ratio,
                     )
                     if symbol_regimes:
@@ -780,7 +863,7 @@ def main(argv: list[str] | None = None) -> int:
                     row["data_source"] = "binance_usdm_futures"
                     row["requested_m1_bars"] = args.bars
                     row["actual_m1_bars"] = len(m1)
-                    row["cost_bps_per_side"] = round(effective_spread / float(m1["close"].iloc[-1]) * 10000, 4)
+                    row["cost_bps_per_side"] = 4.0
                     results.append(row)
                     sys.stderr.write(
                         f"[PHASE12-MATRIX] [{s_idx}/{total_symbols}] Completed {crypto_symbol} {tf}: "

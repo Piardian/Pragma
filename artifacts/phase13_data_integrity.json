@@ -1,0 +1,41 @@
+{
+  "BTCUSDT":{
+    "bars":300000,
+    "start":"2026-03-22 09:24:00+00:00",
+    "end":"2026-10-16 17:23:00+00:00",
+    "duration_days":208.33,
+    "duplicates":0,
+    "gaps_count":0,
+    "missing_bars_count":0,
+    "ohlc_valid":true,
+    "finite_valid":true,
+    "volume_positive":true,
+    "has_volume_delta":true
+  },
+  "SOLUSDT":{
+    "bars":300000,
+    "start":"2026-03-22 09:25:00+00:00",
+    "end":"2026-10-16 17:24:00+00:00",
+    "duration_days":208.33,
+    "duplicates":0,
+    "gaps_count":0,
+    "missing_bars_count":0,
+    "ohlc_valid":true,
+    "finite_valid":true,
+    "volume_positive":true,
+    "has_volume_delta":true
+  },
+  "LINKUSDT":{
+    "bars":300000,
+    "start":"2026-03-22 09:25:00+00:00",
+    "end":"2026-10-16 17:24:00+00:00",
+    "duration_days":208.33,
+    "duplicates":0,
+    "gaps_count":0,
+    "missing_bars_count":0,
+    "ohlc_valid":true,
+    "finite_valid":true,
+    "volume_positive":true,
+    "has_volume_delta":true
+  }
+}

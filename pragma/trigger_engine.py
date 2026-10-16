@@ -135,7 +135,7 @@ def evaluate_trigger(
         else:
             last_timestamp = last_timestamp.tz_convert("UTC")
         session_hour_utc = int(last_timestamp.hour)
-        session_start, session_end = session_hours_utc or ((0, 24) if source_is_binance else ACTIVE_TRADING_HOURS_UTC)
+        session_start, session_end = session_hours_utc or ((8, 22) if source_is_binance else ACTIVE_TRADING_HOURS_UTC)
         session_allowed = session_start <= session_hour_utc < session_end
 
     close = bars["close"]
@@ -175,8 +175,8 @@ def evaluate_trigger(
         wick_ratio = (float(last["high"] - max(last["open"], last["close"])) / candle_range
                       if candle_range > 0 else 0.0)
         rejection = bool(last["close"] < last["open"] or wick_ratio >= 0.40)
-        if confirm_binance_delta and source_is_binance and last_delta is not None:
-            delta_ok = last_delta < 0 or wick_ratio >= 0.60
+        if confirm_binance_delta and source_is_binance:
+            delta_ok = bool(last_delta is not None and last_delta < 0)
             rejection = rejection and delta_ok
         stop_loss = poi_high + float(sl_atr_buffer) * atr
         z_rule = f"Z>=+{abs(z_extreme):g} in last 5; current Z falls and <=+{abs(z_recovery):g}"

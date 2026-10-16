@@ -56,7 +56,7 @@ CRYPTO_MOMENTUM = InstrumentProfile(
     mean_reversion_confluence_atr=0.75,
     min_spread_to_sl_ratio=4.0,
     default_trigger_tf="M15",
-    active_hours_utc=(0, 24),
+    active_hours_utc=(8, 22),
 )
 
 _CRYPTO_SYMBOLS = frozenset({

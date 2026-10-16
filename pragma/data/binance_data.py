@@ -36,25 +36,27 @@ class BinanceDataError(RuntimeError):
     """Raised when Binance returns invalid or insufficient market data."""
 
 
-def btc_leader_allows_direction(btc_regime: str, symbol: str, direction: str) -> bool:
-    """Return False for counter-BTC altcoin directions under strong imbalance regimes."""
-    regime = str(btc_regime or "").upper()
+def btc_leader_allows_direction(btc_regime: str | None, symbol: str, direction: str) -> bool:
+    """Return False for counter-BTC altcoin directions, and require IMBALANCE_BEAR for altcoin shorts."""
     pair = normalize_binance_symbol(symbol)
     side = str(direction or "").upper()
     if pair == "BTCUSDT":
         return True
-    if regime == "IMBALANCE_BEAR" and side == "LONG":
+    if not btc_regime:
         return False
-    if regime == "IMBALANCE_BULL" and side == "SHORT":
-        return False
-    return True
+    regime = str(btc_regime).upper()
+    if side == "LONG":
+        return regime != "IMBALANCE_BEAR"
+    if side == "SHORT":
+        return regime == "IMBALANCE_BEAR"
+    return False
 
 
 def normalize_binance_symbol(symbol: str) -> str:
     value = str(symbol or "").strip().upper().replace("/", "").replace("_", "").replace("-", "")
     aliases = {"BTC": "BTCUSDT", "BTCUSD": "BTCUSDT", "XBTUSD": "BTCUSDT",
                "ETH": "ETHUSDT", "ETHUSD": "ETHUSDT", "SOL": "SOLUSDT",
-               "SOLUSD": "SOLUSDT"}
+               "SOLUSD": "SOLUSDT", "LINK": "LINKUSDT", "LINKUSD": "LINKUSDT"}
     return aliases.get(value, value)
 
 

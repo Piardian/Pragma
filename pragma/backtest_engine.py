@@ -153,7 +153,10 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
             position.stop_loss = position.entry_price + offset if direction == "LONG" else position.entry_price - offset
         # OHLC cannot reveal target ordering. If TP2 is also touched, treat the
         # remaining half as breakeven when that level was crossed in the candle.
-        breakeven_hit = low <= position.entry_price if direction == "LONG" else high >= position.entry_price
+        breakeven_hit = (
+            low <= position.stop_loss if direction == "LONG"
+            else high >= position.stop_loss
+        )
         if tp2_hit and not breakeven_hit:
             tp2_exit = _adverse_price(position.tp2, direction, False, cost)
             position.r_multiple += (1.0 - position.tp1_close_pct) * (

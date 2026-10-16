@@ -608,8 +608,7 @@ def _print_report(report: BacktestReport) -> None:
     for name, count in report.funnel_counts.items():
         print(f"  {name}: {count}")
     for title, groups in (("By regime", report.trades_by_regime), ("By POI type", report.trades_by_poi_type)):
-        print(f"
-{title}:")
+        print(f"\n{title}:")
         if not groups:
             print("  No closed trades")
         for name, values in groups.items():

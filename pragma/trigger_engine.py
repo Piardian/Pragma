@@ -126,6 +126,7 @@ def evaluate_trigger(
         raise ValueError("cost_price must be finite and non-negative")
     cost_price = float(cost_price)
     session_hour_utc = None
+    source_is_binance = str(bars.attrs.get("source", "")).lower() == "binance"
     session_allowed = True
     if isinstance(bars.index, pd.DatetimeIndex):
         last_timestamp = pd.Timestamp(bars.index[-1])
@@ -134,7 +135,6 @@ def evaluate_trigger(
         else:
             last_timestamp = last_timestamp.tz_convert("UTC")
         session_hour_utc = int(last_timestamp.hour)
-        source_is_binance = str(bars.attrs.get("source", "")).lower() == "binance"
         session_start, session_end = session_hours_utc or ((0, 24) if source_is_binance else ACTIVE_TRADING_HOURS_UTC)
         session_allowed = session_start <= session_hour_utc < session_end
 
@@ -152,7 +152,6 @@ def evaluate_trigger(
     touch_mask = (last_three["low"] <= poi_high) & (last_three["high"] >= poi_low)
     poi_touched = bool(touch_mask.any())
     last_five_z = z_score.iloc[-5:]
-    source_is_binance = str(bars.attrs.get("source", "")).lower() == "binance"
     last_delta = float(bars["volume_delta"].iloc[-1]) if "volume_delta" in bars.columns else None
     delta_ok = True
     if direction == "LONG":
@@ -283,7 +282,6 @@ def evaluate_trigger(
         "volume_climax_position": int(climax_pos) if climax_pos is not None else None,
         "rejection": rejection,
         "volume_delta": last_delta,
-        "binance_delta_confirmation": delta_ok,
         "volume_delta": last_delta,
         "binance_delta_confirmation": delta_ok,
         "rr_ratio": rr,

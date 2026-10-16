@@ -34,7 +34,7 @@ class InstrumentProfileTests(unittest.TestCase):
 
     def test_fx_profile_parameters_and_cross_detection(self):
         for symbol in ("EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "USDCAD",
-                       "USDCHF", "EURGBP", "AUDJPY", "EURTRY"):
+                       "USDCHF", "EURGBP", "AUDJPY", "EURTRY", "USDINR"):
             with self.subTest(symbol=symbol):
                 self.assertEqual(get_instrument_profile(symbol), FX_MEAN_REVERSION)
         self.assertEqual(FX_MEAN_REVERSION.name, "FX_MEAN_REVERSION")

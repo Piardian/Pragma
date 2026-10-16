@@ -32,7 +32,21 @@ class BinanceDataError(RuntimeError):
     """Raised when Binance returns invalid or insufficient market data."""
 
 
-def btc_leader_allows_direction(btc_regime: str, symbol: str, direction: str) -> bool:\n    """Return False for counter-BTC altcoin directions under strong imbalance regimes."""\n    regime = str(btc_regime or "").upper()\n    pair = normalize_binance_symbol(symbol)\n    side = str(direction or "").upper()\n    if pair == "BTCUSDT":\n        return True\n    if regime == "IMBALANCE_BEAR" and side == "LONG":\n        return False\n    if regime == "IMBALANCE_BULL" and side == "SHORT":\n        return False\n    return True\n\n\ndef normalize_binance_symbol(symbol: str) -> str:
+def btc_leader_allows_direction(btc_regime: str, symbol: str, direction: str) -> bool:
+    """Return False for counter-BTC altcoin directions under strong imbalance regimes."""
+    regime = str(btc_regime or "").upper()
+    pair = normalize_binance_symbol(symbol)
+    side = str(direction or "").upper()
+    if pair == "BTCUSDT":
+        return True
+    if regime == "IMBALANCE_BEAR" and side == "LONG":
+        return False
+    if regime == "IMBALANCE_BULL" and side == "SHORT":
+        return False
+    return True
+
+
+def normalize_binance_symbol(symbol: str) -> str:
     value = str(symbol or "").strip().upper().replace("/", "").replace("_", "").replace("-", "")
     aliases = {"BTC": "BTCUSDT", "BTCUSD": "BTCUSDT", "XBTUSD": "BTCUSDT",
                "ETH": "ETHUSDT", "ETHUSD": "ETHUSDT", "SOL": "SOLUSDT",

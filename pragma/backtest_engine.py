@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from pragma.amt_engine import calculate_volume_profile
-from pragma.data.mt5_data import MT5DataClient, filter_closed_bars
+from pragma.data.mt5_data import MT5DataClient, filter_closed_bars\nfrom pragma.data.binance_data import BinanceDataClient, normalize_binance_symbol
 from pragma.macro_gate import MacroGate
 from pragma.instrument_profiles import default_trigger_tf_for_symbol, get_instrument_profile, normalize_trigger_tf, trigger_tf_minutes
 from pragma.regime_poi_engine import generate_regime_pois
@@ -618,7 +618,7 @@ def _print_report(report: BacktestReport) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Causal Pragma walk-forward backtest")
-    parser.add_argument("--symbol", default="XAUUSD")
+    parser.add_argument("--symbol", default="XAUUSD")\n    parser.add_argument("--source", choices=("auto", "mt5", "binance"), default="auto")\n    parser.add_argument("--no-cache", action="store_true", help="Disable Binance CSV cache")\n    parser.add_argument("--scan-crypto", action="store_true", help="Backtest the major Binance USDT crypto basket")\n    parser.add_argument("--btc-leader-filter", action="store_true", help="Apply BTC regime leadership filter in crypto scans")
     parser.add_argument("--bars", type=int, default=20000)
     parser.add_argument("--macro-bias", type=int, choices=(-1, 0, 1), default=None)
     parser.add_argument("--profile-bins", type=int, default=100)
@@ -650,7 +650,7 @@ def main(argv: list[str] | None = None) -> int:
         allow_range = False
     else:
         if args.macro_bias is None:
-            gate = MacroGate().get_bias(args.symbol)
+            gate = MacroGate().get_bias(symbol)
             bias = int(gate.bias)
             allow_range = getattr(gate, "gate", None) == "NEUTRAL_RANGE"
         else:
@@ -663,7 +663,7 @@ def main(argv: list[str] | None = None) -> int:
         m1 = filter_closed_bars(m1, "M1", now=now)
         m15 = filter_closed_bars(m15, "M15", now=now)
     report = run_backtest(
-        m1, symbol=args.symbol, macro_bias=bias, m15_bars=m15,
+        m1, symbol=symbol, macro_bias=bias, m15_bars=m15,
         profile_bins=args.profile_bins, spread_points=args.spread_points,
         point_size=point_size, allow_range=allow_range,
         allow_mean_reversion=True if args.allow_mean_reversion else None,

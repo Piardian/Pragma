@@ -183,7 +183,7 @@ class BinanceDataClient:
             latest_open_ms = int(cached.index[-1].timestamp() * 1000)
             end_time = now_ms if latest_open_ms + interval_ms < now_ms - interval_ms else latest_open_ms + interval_ms * 2
             gap_bars = max(2, int(max(0, now_ms - latest_open_ms) // interval_ms) + 2)
-            remaining = min(count, gap_bars)
+            remaining = min(count, max(gap_bars, count - len(cached)))
         # Page backward; API caps are 1500 futures / 1000 spot candles.
         while remaining > 0:
             page_limit = min(remaining, 1500)

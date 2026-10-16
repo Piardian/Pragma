@@ -252,6 +252,7 @@ def run_pipeline(
             center_price=poi.center, cost_price=cost_price,
             sl_atr_buffer=instrument_profile.sl_atr_buffer,
             min_spread_to_sl_ratio=instrument_profile.min_spread_to_sl_ratio,
+            session_hours_utc=instrument_profile.active_hours_utc,
         )
         trigger_reports.append({
             "execute": decision.execute,

@@ -139,8 +139,9 @@ def generate_regime_pois(
     setups, confluence is checked against the full VWAP +/-1.5σ to +/-2.5σ
     interval, not just its endpoints.
     """
-    if macro_bias not in (-1, 0, 1):
-        raise ValueError("macro_bias must be -1, 0, or +1")
+    auto_direction = isinstance(macro_bias, str) and macro_bias.strip().lower() == "auto"
+    if not auto_direction and macro_bias not in (-1, 0, 1):
+        raise ValueError("macro_bias must be -1, 0, +1, or 'auto'")
     price, atr = _finite(current_price, "current_price"), _finite(atr_14, "atr_14")
     if atr <= 0:
         raise ValueError("atr_14 must be greater than zero")
@@ -169,6 +170,15 @@ def generate_regime_pois(
     upper_1_5 = band("vwap_upper_1p5sigma", vwap_value + 1.5 * sigma)
     lower_2_5 = band("vwap_lower_2p5sigma", vwap_value - 2.5 * sigma)
     upper_2_5 = band("vwap_upper_2p5sigma", vwap_value + 2.5 * sigma)
+    if auto_direction:
+        # Strict, causal internal crypto regime: direction is assigned only when
+        # both price and VWAP clear the prior-session value-area/POC thresholds.
+        if price > vah and vwap_value >= poc + (0.15 * atr):
+            macro_bias = 1
+        elif price < val and vwap_value <= poc - (0.15 * atr):
+            macro_bias = -1
+        else:
+            macro_bias = 0
     regime = classify_regime(price, previous_profile, {"vwap": vwap_value}, atr)
     if macro_bias == 0 and not allow_range:
         return RegimePOIDecision(regime, macro_bias, price, atr, (), "NEUTRAL_MACRO")

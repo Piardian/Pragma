@@ -261,11 +261,6 @@ class PaperTradingBook:
             )
         else:
             position["remaining_fraction"] = remaining
-            self._notify(
-                f"PRAGMA SHADOW — {outcome}\n{symbol} {position['direction']}\n"
-                f"Kısmi PnL: {pnl:+.2f}\nGerçekleşen işlem PnL: {position['realized_pnl']:+.2f}\n"
-                f"Bakiye: {self.state['balance']:.2f}"
-            )
 
 
 def _decision_signals(report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -292,6 +287,14 @@ def run_daemon(args: argparse.Namespace) -> int:
         while True:
             try:
                 active_symbols = _active_begonya_mt5_symbols()
+                active_names = {symbol.upper() for symbol, _bias in active_symbols}
+                # Existing virtual positions must keep being managed if a macro gate turns neutral.
+                for open_symbol in list(book.state["open_positions"]):
+                    if open_symbol.upper() not in active_names:
+                        active_symbols.append((open_symbol, 0))
+                active_symbols = sorted(
+                    {symbol.upper(): (symbol, bias) for symbol, bias in active_symbols}.values()
+                )
                 if not active_symbols:
                     print("[SHADOW] Aktif Begonya sembolü bulunamadı; yeniden denenecek.", flush=True)
                 for symbol, _bias in active_symbols:
@@ -305,14 +308,17 @@ def run_daemon(args: argparse.Namespace) -> int:
                         pending = closed if not last_seen else closed.loc[closed.index > pd.Timestamp(last_seen)]
                         if pending.empty:
                             continue
-                        report = run_pipeline(
-                            symbol=symbol, bars_count=args.bars, dry_run=False,
-                            notifier=ConsoleOnlyNotifier(), notify_pois=False,
-                            trigger_tf=args.trigger_tf,
-                            cost_price=args.spread_points * args.point_size if args.point_size else 0.0,
-                        )
-                        latest_signal_time = pd.Timestamp(report["bars"]["last_closed_m1_time"])
-                        signals = _decision_signals(report)
+                        signals: list[dict[str, Any]] = []
+                        latest_signal_time = pd.Timestamp(closed.index[-1])
+                        if _bias != 0:
+                            report = run_pipeline(
+                                symbol=symbol, bars_count=args.bars, dry_run=False,
+                                notifier=ConsoleOnlyNotifier(), notify_pois=False,
+                                trigger_tf=args.trigger_tf,
+                                cost_price=args.spread_points * args.point_size if args.point_size else 0.0,
+                            )
+                            latest_signal_time = pd.Timestamp(report["bars"]["last_closed_m1_time"])
+                            signals = _decision_signals(report)
                         for bar_time, row in pending.iterrows():
                             stamp = pd.Timestamp(bar_time).isoformat()
                             bar = {key: float(row[key]) for key in ("open", "high", "low", "close")}

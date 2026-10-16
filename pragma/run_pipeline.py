@@ -301,7 +301,8 @@ def _watch(args: argparse.Namespace) -> int:
         raise ValueError("--interval-sec must be >= 1")
     notifier = ExecutionNotifier()
     last_processed_bar_time: str | None = None
-    print(f"PRAGMA WATCH started | symbol={args.symbol} | poll={args.interval_sec}s")
+    profile_name = get_instrument_profile(args.symbol).name
+    print(f"PRAGMA WATCH started | symbol={args.symbol} | profile={profile_name} | poll={args.interval_sec}s")
     try:
         while True:
             try:
@@ -325,7 +326,8 @@ def _watch(args: argparse.Namespace) -> int:
                     price = float(result["bars"]["last_closed_m1_close"])
                     print(
                         f"[{stamp}] {args.symbol} {price:.5f} | "
-                        f"{result['regime']} | Active POI: {len(result.get('pois', []))} | {status}",
+                        f"{result['instrument_profile']} | {result['regime']} | "
+                        f"Active POI: {len(result.get('pois', []))} | {status}",
                         flush=True,
                     )
             except Exception as exc:

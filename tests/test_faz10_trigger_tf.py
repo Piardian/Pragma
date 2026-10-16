@@ -8,9 +8,9 @@ import pandas as pd
 from pragma.backtest_engine import _resample_tf
 from pragma.data.mt5_data import MT5DataClient, filter_closed_bars
 from pragma.instrument_profiles import (
-    CRYPTO_MOMENTUM,
     FX_MEAN_REVERSION,
     MOMENTUM_TREND,
+    default_trigger_tf_for_symbol,
     get_instrument_profile,
     normalize_trigger_tf,
     trigger_tf_minutes,
@@ -59,11 +59,12 @@ class Faz10TriggerTimeframeTests(unittest.TestCase):
     def test_profile_default_trigger_timeframes(self):
         self.assertEqual(FX_MEAN_REVERSION.default_trigger_tf, "M5")
         self.assertEqual(MOMENTUM_TREND.default_trigger_tf, "M5")
-        self.assertEqual(CRYPTO_MOMENTUM.default_trigger_tf, "M15")
+        self.assertEqual(default_trigger_tf_for_symbol("BTCUSD"), "M15")
         for symbol in ("EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "USDCAD", "USDCHF", "EURGBP"):
             self.assertEqual(get_instrument_profile(symbol).default_trigger_tf, "M5", symbol)
         for symbol in ("BTCUSD", "BTC", "ETHUSD", "SOLUSD", "SOL"):
-            self.assertEqual(get_instrument_profile(symbol).default_trigger_tf, "M15", symbol)
+            self.assertEqual(get_instrument_profile(symbol), MOMENTUM_TREND, symbol)
+            self.assertEqual(default_trigger_tf_for_symbol(symbol), "M15", symbol)
         for symbol in ("XAUUSD", "SPX", "US100"):
             self.assertEqual(get_instrument_profile(symbol).default_trigger_tf, "M5", symbol)
 

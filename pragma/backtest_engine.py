@@ -351,7 +351,7 @@ def run_backtest(
     m1_bars: pd.DataFrame,
     *,
     symbol: str = "XAUUSD",
-    macro_bias: int = 1,
+    macro_bias: int | str = 1,
     m15_bars: pd.DataFrame | None = None,
     profile_bins: int = 100,
     spread_points: float = 0.0,
@@ -377,8 +377,8 @@ def run_backtest(
     effective_allow_trend_pullback = (
         instrument_profile.allow_trend_pullback and not disable_trend_pullback
     )
-    if macro_bias not in (-1, 0, 1):
-        raise ValueError("macro_bias must be -1, 0, or +1")
+    if not (isinstance(macro_bias, str) and macro_bias.strip().lower() == "auto") and macro_bias not in (-1, 0, 1):
+        raise ValueError("macro_bias must be -1, 0, +1, or 'auto'")
     if not np.isfinite(tp1_close_pct) or not 0.0 <= tp1_close_pct <= 1.0:
         raise ValueError("tp1_close_pct must be between 0 and 1")
     if be_offset_r is not None and not np.isfinite(be_offset_r):
@@ -633,8 +633,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-cache", action="store_true", help="Disable Binance CSV cache")
     parser.add_argument("--scan-crypto", action="store_true", help="Backtest the major Binance USDT crypto basket")
     parser.add_argument("--btc-leader-filter", action="store_true", help="Apply BTC regime leadership filter in crypto scans")
-    parser.add_argument("--bars", type=int, default=20000)
-    parser.add_argument("--macro-bias", type=int, choices=(-1, 0, 1), default=None)
+    parser.add_argument("--bars", type=int, default=100000)
+    parser.add_argument("--macro-bias", choices=("-1", "0", "1", "auto"), default=None, help="Macro direction override, or auto for internal crypto regime")
+    parser.add_argument("--auto-direction", action="store_true", help="Infer long/short direction from the current causal crypto regime")
     parser.add_argument("--profile-bins", type=int, default=100)
     parser.add_argument("--spread-points", type=float, default=0.0,
                         help="Adverse spread/slippage cost in instrument points")
@@ -656,25 +657,38 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="Use deterministic synthetic M1 data instead of MT5")
     args = parser.parse_args(argv)
+    if args.macro_bias is not None and args.macro_bias != "auto":
+        args.macro_bias = int(args.macro_bias)
+    if args.auto_direction:
+        args.macro_bias = "auto"
     if args.scan_crypto:
-        symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT")
+        symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT")
+        timeframes = (args.trigger_tf,) if args.trigger_tf else ("M5", "M15")
         results = []
         for crypto_symbol in symbols:
             try:
                 client = BinanceDataClient(no_cache=args.no_cache)
-                m1 = client.rates(crypto_symbol, "M1", args.bars)
-                m15 = client.rates(crypto_symbol, "M15", max(300, args.bars // 15 + 50))
+                m1 = client.rates(crypto_symbol, "M1", max(100000, args.bars))
+                if len(m1) < 100000:
+                    raise ValueError(f"Insufficient M1 history: {len(m1)} bars; at least 100000 required")
+                m15 = client.rates(crypto_symbol, "M15", max(300, len(m1) // 15 + 50))
                 m1.attrs["source"] = "binance"
                 m15.attrs["source"] = "binance"
-                bias = args.macro_bias if args.macro_bias is not None else 1
+                bias = args.macro_bias if args.macro_bias is not None else "auto"
                 crypto_point = args.point_size if args.point_size is not None else 0.01
                 effective_spread = max(args.spread_points, float(m1["close"].iloc[-1]) * 0.0004 / crypto_point)
-                report = run_backtest(m1, symbol=crypto_symbol, macro_bias=bias, m15_bars=m15,
-                    profile_bins=args.profile_bins, spread_points=effective_spread, point_size=crypto_point,
-                    allow_mean_reversion=True if args.allow_mean_reversion else None,
-                    disable_trend_pullback=args.disable_trend_pullback, trigger_tf=args.trigger_tf,
-                    tp1_close_pct=args.tp1_close_pct, be_offset_r=None if args.no_breakeven else args.be_offset_r)
-                results.append(report.to_dict())
+                for tf in timeframes:
+                    report = run_backtest(m1, symbol=crypto_symbol, macro_bias=bias, m15_bars=m15,
+                        profile_bins=args.profile_bins, spread_points=effective_spread, point_size=crypto_point,
+                        allow_mean_reversion=True if args.allow_mean_reversion else None,
+                        disable_trend_pullback=args.disable_trend_pullback, trigger_tf=tf,
+                        tp1_close_pct=args.tp1_close_pct, be_offset_r=None if args.no_breakeven else args.be_offset_r)
+                    row = report.to_dict()
+                    row["data_source"] = "binance_usdm_futures"
+                    row["requested_m1_bars"] = max(100000, args.bars)
+                    row["actual_m1_bars"] = len(m1)
+                    row["cost_bps_per_side"] = round(effective_spread / float(m1["close"].iloc[-1]) * 10000, 4)
+                    results.append(row)
             except Exception as exc:
                 results.append({"symbol": crypto_symbol, "error": str(exc)})
         print(json.dumps(results, indent=2, allow_nan=True))

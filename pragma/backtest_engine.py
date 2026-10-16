@@ -57,6 +57,7 @@ class BacktestReport:
     max_total_drawdown_pct: float
     trades_by_regime: dict[str, dict[str, float]]
     trades_by_poi_type: dict[str, dict[str, float]]
+    trade_outcomes: dict[str, int]
     spread_points: float
     point_size: float
     funnel_counts: dict[str, int]
@@ -82,6 +83,8 @@ class _OpenTrade:
     initial_risk: float
     r_multiple: float = 0.0
     tp1_taken: bool = False
+    tp1_close_pct: float = 0.50
+    be_offset_r: float | None = 0.0
 
 
 def _trade_record(position: _OpenTrade, timestamp: pd.Timestamp,
@@ -105,12 +108,12 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
     if stop_hit:
         exit_price = _adverse_price(position.stop_loss, direction, False, cost)
         if position.tp1_taken:
-            remaining_r = 0.5 * (
+            remaining_r = (1.0 - position.tp1_close_pct) * (
                 (exit_price - position.entry_price) if direction == "LONG"
                 else (position.entry_price - exit_price)
             ) / position.initial_risk
             position.r_multiple += remaining_r
-            reason = "BREAKEVEN_STOP" if abs(position.stop_loss - position.entry_price) < 1e-12 else "STOP_LOSS"
+            reason = "BREAKEVEN_STOP" if position.be_offset_r == 0.0 and abs(position.stop_loss - position.entry_price) < 1e-12 else "STOP_LOSS"
         else:
             position.r_multiple = (
                 (exit_price - position.entry_price) if direction == "LONG"
@@ -130,26 +133,40 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
         ) / position.initial_risk
         return _trade_record(position, timestamp, "TAKE_PROFIT_2_SINGLE_TARGET")
     if not position.tp1_taken and tp1_hit:
+        if position.tp1_close_pct <= 0.0:
+            if tp2_hit:
+                target_exit = _adverse_price(position.tp2, direction, False, cost)
+                position.r_multiple = (
+                    (target_exit - position.entry_price) if direction == "LONG"
+                    else (position.entry_price - target_exit)
+                ) / position.initial_risk
+                return _trade_record(position, timestamp, "TAKE_PROFIT_2")
+            return None
         tp1_exit = _adverse_price(position.tp1, direction, False, cost)
-        position.r_multiple += 0.5 * (
+        position.r_multiple += position.tp1_close_pct * (
             (tp1_exit - position.entry_price) if direction == "LONG"
             else (position.entry_price - tp1_exit)
         ) / position.initial_risk
         position.tp1_taken = True
-        position.stop_loss = position.entry_price
+        if position.be_offset_r is not None:
+            offset = position.be_offset_r * position.initial_risk
+            position.stop_loss = position.entry_price + offset if direction == "LONG" else position.entry_price - offset
         # OHLC cannot reveal target ordering. If TP2 is also touched, treat the
         # remaining half as breakeven when that level was crossed in the candle.
-        breakeven_hit = low <= position.entry_price if direction == "LONG" else high >= position.entry_price
+        breakeven_hit = (
+            low <= position.stop_loss if direction == "LONG"
+            else high >= position.stop_loss
+        )
         if tp2_hit and not breakeven_hit:
             tp2_exit = _adverse_price(position.tp2, direction, False, cost)
-            position.r_multiple += 0.5 * (
+            position.r_multiple += (1.0 - position.tp1_close_pct) * (
                 (tp2_exit - position.entry_price) if direction == "LONG"
                 else (position.entry_price - tp2_exit)
             ) / position.initial_risk
             return _trade_record(position, timestamp, "TP1_TP2_SAME_BAR")
         if breakeven_hit:
             be_exit = _adverse_price(position.entry_price, direction, False, cost)
-            position.r_multiple += 0.5 * (
+            position.r_multiple += (1.0 - position.tp1_close_pct) * (
                 (be_exit - position.entry_price) if direction == "LONG"
                 else (position.entry_price - be_exit)
             ) / position.initial_risk
@@ -158,7 +175,7 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
 
     if position.tp1_taken and tp2_hit:
         tp2_exit = _adverse_price(position.tp2, direction, False, cost)
-        position.r_multiple += 0.5 * (
+        position.r_multiple += (1.0 - position.tp1_close_pct) * (
             (tp2_exit - position.entry_price) if direction == "LONG"
             else (position.entry_price - tp2_exit)
         ) / position.initial_risk
@@ -191,13 +208,24 @@ def _utc_index(frame: pd.DataFrame, name: str) -> pd.DataFrame:
     return out
 
 
-def _resample_m15(m1: pd.DataFrame) -> pd.DataFrame:
-    return m1[["open", "high", "low", "close", "tick_volume"]].resample(
-        "15min", label="left", closed="left"
+def _resample_tf(m1: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Resample M1 bars into left-labelled OHLCV buckets."""
+    if timeframe not in {"M1", "M5", "M15"}:
+        raise ValueError("trigger_tf must be one of M1, M5, M15")
+    minutes = int(timeframe[1:])
+    columns = ["open", "high", "low", "close", "tick_volume"]
+    if minutes == 1:
+        return m1[columns].copy()
+    return m1[columns].resample(
+        f"{minutes}min", label="left", closed="left", origin="start_day"
     ).agg({
         "open": "first", "high": "max", "low": "min",
         "close": "last", "tick_volume": "sum",
     }).dropna()
+
+
+def _resample_m15(m1: pd.DataFrame) -> pd.DataFrame:
+    return _resample_tf(m1, "M15")
 
 
 def _atr14(m15_closed: pd.DataFrame) -> float | None:
@@ -256,6 +284,11 @@ def _make_report(symbol: str, bars_processed: int, trades: list[BacktestTrade],
                  funnel_counts: dict[str, int] | None = None,
                  instrument_profile: str = "MOMENTUM_TREND") -> BacktestReport:
     values = [trade.r_multiple for trade in trades]
+    trade_outcomes = {
+        "full_sl_hits": sum(t.exit_reason == "STOP_LOSS" and not t.tp1_taken for t in trades),
+        "tp1_then_be_hits": sum(t.tp1_taken and t.exit_reason in {"BREAKEVEN_STOP", "TP1_THEN_BREAKEVEN_SAME_BAR"} for t in trades),
+        "full_tp2_hits": sum(t.exit_reason in {"TAKE_PROFIT_2", "TP1_TP2_SAME_BAR", "TAKE_PROFIT_2_SINGLE_TARGET"} for t in trades),
+    }
     wins = sum(value for value in values if value > 0)
     losses = -sum(value for value in values if value < 0)
     equity_r = 0.0
@@ -294,6 +327,7 @@ def _make_report(symbol: str, bars_processed: int, trades: list[BacktestTrade],
         max_total_drawdown_pct=float(max_total_dd_pct),
         trades_by_regime=_daily_group_stats(trades, "regime"),
         trades_by_poi_type=_daily_group_stats(trades, "poi_type"),
+        trade_outcomes=trade_outcomes,
         spread_points=float(spread_points),
         point_size=float(point_size),
         funnel_counts=dict(funnel_counts or {}),
@@ -313,6 +347,9 @@ def run_backtest(
     allow_range: bool = False,
     allow_mean_reversion: bool | None = None,
     disable_trend_pullback: bool = False,
+    trigger_tf: str = "M1",
+    tp1_close_pct: float = 0.50,
+    be_offset_r: float | None = 0.0,
 ) -> BacktestReport:
     """Simulate a single instrument without future-data leakage.
 
@@ -329,6 +366,12 @@ def run_backtest(
     )
     if macro_bias not in (-1, 0, 1):
         raise ValueError("macro_bias must be -1, 0, or +1")
+    if trigger_tf not in {"M1", "M5", "M15"}:
+        raise ValueError("trigger_tf must be one of M1, M5, M15")
+    if not np.isfinite(tp1_close_pct) or not 0.0 <= tp1_close_pct <= 1.0:
+        raise ValueError("tp1_close_pct must be between 0 and 1")
+    if be_offset_r is not None and not np.isfinite(be_offset_r):
+        raise ValueError("be_offset_r must be finite or None")
     if profile_bins < 2:
         raise ValueError("profile_bins must be >= 2")
     if not np.isfinite(spread_points) or spread_points < 0:
@@ -338,6 +381,7 @@ def run_backtest(
     m1 = _utc_index(m1_bars, "M1 bars")
     if len(m1) < 300:
         raise ValueError("At least 300 M1 bars are required for walk-forward simulation")
+    trigger_bars = _resample_tf(m1, trigger_tf)
     if m15_bars is None:
         m15 = _resample_m15(m1)
     else:
@@ -398,6 +442,15 @@ def run_backtest(
                 trades.append(closed_trade)
                 position = None
 
+        trigger_minutes = int(trigger_tf[1:])
+        if trigger_minutes > 1 and decision_time.minute % trigger_minutes != 0:
+            continue
+        trigger_cutoff = decision_time - pd.Timedelta(minutes=trigger_minutes)
+        trigger_idx = trigger_bars.index.searchsorted(trigger_cutoff, side="right")
+        eligible_triggers = trigger_bars.iloc[:trigger_idx]
+        if eligible_triggers.empty or eligible_triggers.index[-1] + pd.Timedelta(minutes=trigger_minutes) > decision_time:
+            continue
+
         # Keep diagnostics running while a trade is open, but block new entries.
         can_enter = position is None
         current_session = str(bar["session"])
@@ -432,7 +485,7 @@ def run_backtest(
         decisions = []
         for poi in regime_decision.pois:
             decision = evaluate_trigger(
-                m1.iloc[max(0, i - 29):i + 1], poi.direction,
+                eligible_triggers.iloc[max(0, len(eligible_triggers) - 30):], poi.direction,
                 poi.poi_low, poi.poi_high, atr, poi.take_profits,
                 poi_type=poi.poi_type, center_price=poi.center, cost_price=cost,
                 sl_atr_buffer=instrument_profile.sl_atr_buffer,
@@ -477,7 +530,8 @@ def run_backtest(
                 symbol=symbol, direction=poi.direction, poi_type=poi.poi_type,
                 regime=regime_decision.regime.value, entry_time=timestamp,
                 entry_price=entry, initial_stop_loss=stop, stop_loss=stop,
-                tp1=float(tp1), tp2=float(tp2), initial_risk=risk,
+                tp1=float(tp1 if tp1_close_pct > 0.0 else tp2), tp2=float(tp2),
+                initial_risk=risk, tp1_close_pct=tp1_close_pct, be_offset_r=be_offset_r,
             )
             funnel_counts["trades_opened"] += 1
             break
@@ -487,7 +541,7 @@ def run_backtest(
     if position is not None:
         final_time = m1.index[-1]
         final_close = _adverse_price(float(m1.iloc[-1]["close"]), position.direction, False, cost)
-        remaining_fraction = 0.5 if position.tp1_taken else 1.0
+        remaining_fraction = (1.0 - position.tp1_close_pct) if position.tp1_taken else 1.0
         position.r_multiple += remaining_fraction * (
             (final_close - position.entry_price) if position.direction == "LONG"
             else (position.entry_price - final_close)
@@ -570,6 +624,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="Adverse spread/slippage cost in instrument points")
     parser.add_argument("--point-size", type=float, default=None,
                         help="Price units per point; inferred by symbol when omitted")
+    parser.add_argument("--trigger-tf", choices=("M1", "M5", "M15"), default="M1")
+    parser.add_argument("--tp1-close-pct", type=float, default=0.50,
+                        help="Fraction closed at TP1; 0 disables partial exit")
+    be_group = parser.add_mutually_exclusive_group()
+    be_group.add_argument("--be-offset-r", type=float, default=0.0,
+                          help="Stop offset from entry after TP1, measured in R")
+    be_group.add_argument("--no-breakeven", action="store_true",
+                          help="Keep the original stop after TP1")
     parser.add_argument("--allow-mean-reversion", action="store_true",
                         help="Override the instrument profile and enable BALANCE mean-reversion POIs")
     parser.add_argument("--disable-trend-pullback", action="store_true",
@@ -603,6 +665,8 @@ def main(argv: list[str] | None = None) -> int:
         point_size=point_size, allow_range=allow_range,
         allow_mean_reversion=True if args.allow_mean_reversion else None,
         disable_trend_pullback=args.disable_trend_pullback,
+        trigger_tf=args.trigger_tf, tp1_close_pct=args.tp1_close_pct,
+        be_offset_r=None if args.no_breakeven else args.be_offset_r,
     )
     _print_report(report)
     print("\nJSON:")

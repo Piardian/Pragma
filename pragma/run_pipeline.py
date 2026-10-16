@@ -20,7 +20,7 @@ from pragma.amt_engine import AMTEngine, calculate_session_profiles
 from pragma.data.mt5_data import MT5DataClient, filter_closed_bars
 from pragma.execution_notifier import ExecutionNotifier
 from pragma.macro_gate import MacroGate, refresh_begonya_gate
-from pragma.instrument_profiles import get_instrument_profile
+from pragma.instrument_profiles import canonical_symbol, get_instrument_profile, normalize_trigger_tf, trigger_tf_minutes
 from pragma.regime_poi_engine import generate_regime_pois
 from pragma.trigger_engine import evaluate_trigger
 from pragma.vwap_engine import VWAPEngine
@@ -76,9 +76,8 @@ def _atr_from_m15(bars: pd.DataFrame, period: int = 14) -> float:
 
 
 def _closed_tf_from_m1(m1: pd.DataFrame, timeframe: str, now: datetime | pd.Timestamp) -> pd.DataFrame:
-    if timeframe not in {"M1", "M5", "M15"}:
-        raise ValueError("trigger_tf must be one of M1, M5, M15")
-    minutes = int(timeframe[1:])
+    timeframe = normalize_trigger_tf(timeframe)
+    minutes = trigger_tf_minutes(timeframe)
     columns = ["open", "high", "low", "close", "tick_volume"]
     if minutes == 1:
         return filter_closed_bars(m1[columns], "M1", now=now)
@@ -108,7 +107,7 @@ def run_pipeline(
     allow_mean_reversion: bool | None = None,
     disable_trend_pullback: bool = False,
     cost_price: float = 0.0,
-    trigger_tf: str = "M1",
+    trigger_tf: str | None = None,
 ) -> dict[str, Any]:
     """Run all analytical layers and return a JSON-serializable report."""
     clock = pd.Timestamp(now if now is not None else datetime.now(timezone.utc))
@@ -117,9 +116,8 @@ def run_pipeline(
     else:
         clock = clock.tz_convert("UTC")
 
-    if trigger_tf not in {"M1", "M5", "M15"}:
-        raise ValueError("trigger_tf must be one of M1, M5, M15")
     instrument_profile = get_instrument_profile(symbol)
+    trigger_tf = normalize_trigger_tf(trigger_tf or instrument_profile.default_trigger_tf)
     effective_allow_mean_reversion = (
         instrument_profile.allow_mean_reversion
         if allow_mean_reversion is None else bool(allow_mean_reversion)
@@ -167,7 +165,7 @@ def run_pipeline(
 
     last_bar_time = m1.index[-1]
     last_bar = m1.iloc[-1]
-    trigger_minutes = int(trigger_tf[1:])
+    trigger_minutes = trigger_tf_minutes(trigger_tf)
     trigger_bars = _closed_tf_from_m1(m1, trigger_tf, clock)
     trigger_is_newly_closed = (
         trigger_minutes == 1 or
@@ -253,6 +251,7 @@ def run_pipeline(
     return {
         "symbol": symbol,
         "instrument_profile": instrument_profile.name,
+        "trigger_tf": trigger_tf,
         "dry_run": dry_run,
         "macro": {
             "bias": bias,
@@ -315,43 +314,154 @@ def _latest_closed_m1_time(symbol: str) -> pd.Timestamp | None:
     return None if closed.empty else pd.Timestamp(closed.index[-1])
 
 
+def _active_begonya_mt5_symbols() -> list[tuple[str, int]]:
+    """Return broker symbols that have a fresh, non-neutral Begonya bias."""
+    gate = MacroGate()
+    active: dict[str, int] = {}
+    for gate_symbol in gate.gate_symbols():
+        decision = gate.get_bias(gate_symbol)
+        bias = int(decision.bias)
+        if bias:
+            active[canonical_symbol(gate_symbol)] = bias
+    if not active:
+        return []
+    with MT5DataClient() as client:
+        broker_symbols = client.symbols()
+    matched: dict[str, str] = {}
+    for broker_symbol in broker_symbols:
+        key = canonical_symbol(broker_symbol)
+        if key in active and key not in matched:
+            matched[key] = broker_symbol
+    return sorted(
+        [(broker_symbol, active[key]) for key, broker_symbol in matched.items()],
+        key=lambda item: item[0].upper(),
+    )
+
+
+def _scan_begonya_once(args: argparse.Namespace, notifier: Any | None = None) -> list[dict[str, Any]]:
+    """Run one sequential pass over all active Begonya symbols present in MT5."""
+    symbols = _active_begonya_mt5_symbols()
+    if not symbols:
+        print("BEGONYA SCAN | no active non-neutral gate symbols found in MT5", flush=True)
+        return []
+    results: list[dict[str, Any]] = []
+    for symbol, gate_bias in symbols:
+        try:
+            result = run_pipeline(
+                symbol=symbol, bars_count=args.bars,
+                profile_bins=args.profile_bins, macro_bias=None,
+                dry_run=False, notifier=notifier, notify_pois=False,
+                allow_mean_reversion=True if args.allow_mean_reversion else None,
+                disable_trend_pullback=args.disable_trend_pullback,
+                cost_price=args.spread_points * (
+                    args.point_size if args.point_size is not None else _default_point_size(symbol)
+                ),
+                trigger_tf=args.trigger_tf,
+            )
+            executed = any(item.get("execute") is True for item in result.get("triggers", []))
+            row = {
+                "symbol": symbol, "bias": gate_bias,
+                "profile": result["instrument_profile"],
+                "trigger_tf": result["trigger_tf"],
+                "regime": result["regime"],
+                "pois": len(result.get("pois", [])),
+                "status": "EXECUTE" if executed else "WAIT",
+                "result": result,
+            }
+        except Exception as exc:
+            profile = get_instrument_profile(symbol)
+            row = {
+                "symbol": symbol, "bias": gate_bias,
+                "profile": profile.name,
+                "trigger_tf": normalize_trigger_tf(args.trigger_tf or profile.default_trigger_tf),
+                "regime": "-", "pois": 0, "status": f"ERROR: {exc}",
+                "result": None,
+            }
+        results.append(row)
+    print("\\nBEGONYA ACTIVE SYMBOL SCAN")
+    print(f"{'SYMBOL':<14} {'BIAS':<6} {'PROFILE':<20} {'TF':<5} {'REGIME':<18} {'POI':>4}  STATUS")
+    for row in results:
+        bias_label = "LONG" if row["bias"] > 0 else "SHORT"
+        print(
+            f"{row['symbol']:<14} {bias_label:<6} {row['profile']:<20} "
+            f"{row['trigger_tf']:<5} {row['regime']:<18} {row['pois']:>4}  {row['status']}",
+            flush=True,
+        )
+    return results
+
+
 def _watch(args: argparse.Namespace) -> int:
     if args.dry_run:
         raise ValueError("--watch requires a live MT5 connection; --dry-run is not supported")
     if args.interval_sec < 1:
         raise ValueError("--interval-sec must be >= 1")
     notifier = ExecutionNotifier()
-    last_processed_bar_time: str | None = None
-    profile_name = get_instrument_profile(args.symbol).name
-    print(f"PRAGMA WATCH started | symbol={args.symbol} | profile={profile_name} | poll={args.interval_sec}s")
+    last_processed: dict[str, str] = {}
+    if args.scan_begonya:
+        print(f"PRAGMA WATCH started | mode=Begonya multi-symbol scan | poll={args.interval_sec}s")
+    else:
+        profile = get_instrument_profile(args.symbol)
+        print(
+            f"PRAGMA WATCH started | symbol={args.symbol} | profile={profile.name} | "
+            f"trigger_tf={normalize_trigger_tf(args.trigger_tf or profile.default_trigger_tf)} | "
+            f"poll={args.interval_sec}s"
+        )
     try:
         while True:
             try:
-                latest_time = _latest_closed_m1_time(args.symbol)
-                if latest_time is not None and latest_time.isoformat() != last_processed_bar_time:
-                    result = run_pipeline(
-                        symbol=args.symbol, bars_count=args.bars,
-                        profile_bins=args.profile_bins, macro_bias=args.macro_bias,
-                        dry_run=False, notifier=notifier, notify_pois=False,
-                        allow_mean_reversion=True if args.allow_mean_reversion else None,
-                        disable_trend_pullback=args.disable_trend_pullback,
-                        cost_price=args.spread_points * (args.point_size if args.point_size is not None else _default_point_size(args.symbol)),
-                        trigger_tf=args.trigger_tf,
-                    )
-                    bar_time = result["bars"]["last_closed_m1_time"]
-                    # The pipeline may finish on a bar newer than the cheap poll.
-                    last_processed_bar_time = bar_time
-                    triggers = result.get("triggers", [])
-                    executed = any(item.get("execute") is True for item in triggers)
-                    status = "EXECUTE" if executed else "WAIT"
-                    stamp = result["bars"]["last_closed_m1_time"]
-                    price = float(result["bars"]["last_closed_m1_close"])
-                    print(
-                        f"[{stamp}] {args.symbol} {price:.5f} | "
-                        f"{result['instrument_profile']} | {result['regime']} | "
-                        f"Active POI: {len(result.get('pois', []))} | {status}",
-                        flush=True,
-                    )
+                if args.scan_begonya:
+                    active_symbols = _active_begonya_mt5_symbols()
+                    if not active_symbols:
+                        print("BEGONYA SCAN | no active non-neutral gate symbols found in MT5", flush=True)
+                    for symbol, bias in active_symbols:
+                        latest_time = _latest_closed_m1_time(symbol)
+                        if latest_time is None or latest_time.isoformat() == last_processed.get(symbol):
+                            continue
+                        result = run_pipeline(
+                            symbol=symbol, bars_count=args.bars,
+                            profile_bins=args.profile_bins, macro_bias=None,
+                            dry_run=False, notifier=notifier, notify_pois=False,
+                            allow_mean_reversion=True if args.allow_mean_reversion else None,
+                            disable_trend_pullback=args.disable_trend_pullback,
+                            cost_price=args.spread_points * (
+                                args.point_size if args.point_size is not None else _default_point_size(symbol)
+                            ),
+                            trigger_tf=args.trigger_tf,
+                        )
+                        stamp = result["bars"]["last_closed_m1_time"]
+                        last_processed[symbol] = stamp
+                        executed = any(item.get("execute") is True for item in result.get("triggers", []))
+                        print(
+                            f"[{stamp}] {symbol} bias={'LONG' if bias > 0 else 'SHORT'} "
+                            f"| {result['instrument_profile']} | TF={result['trigger_tf']} "
+                            f"| {result['regime']} | POI={len(result.get('pois', []))} "
+                            f"| {'EXECUTE' if executed else 'WAIT'}",
+                            flush=True,
+                        )
+                else:
+                    latest_time = _latest_closed_m1_time(args.symbol)
+                    if latest_time is not None and latest_time.isoformat() != last_processed.get(args.symbol):
+                        result = run_pipeline(
+                            symbol=args.symbol, bars_count=args.bars,
+                            profile_bins=args.profile_bins, macro_bias=args.macro_bias,
+                            dry_run=False, notifier=notifier, notify_pois=False,
+                            allow_mean_reversion=True if args.allow_mean_reversion else None,
+                            disable_trend_pullback=args.disable_trend_pullback,
+                            cost_price=args.spread_points * (
+                                args.point_size if args.point_size is not None else _default_point_size(args.symbol)
+                            ),
+                            trigger_tf=args.trigger_tf,
+                        )
+                        stamp = result["bars"]["last_closed_m1_time"]
+                        last_processed[args.symbol] = stamp
+                        executed = any(item.get("execute") is True for item in result.get("triggers", []))
+                        print(
+                            f"[{stamp}] {args.symbol} | {result['instrument_profile']} "
+                            f"| TF={result['trigger_tf']} | {result['regime']} "
+                            f"| Active POI: {len(result.get('pois', []))} "
+                            f"| {'EXECUTE' if executed else 'WAIT'}",
+                            flush=True,
+                        )
             except Exception as exc:
                 print(f"[{pd.Timestamp.now(tz='UTC').isoformat()}] WATCH_ERROR | {exc}", flush=True)
             time.sleep(args.interval_sec)
@@ -370,6 +480,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Run the complete pipeline using deterministic synthetic M1 data")
     parser.add_argument("--watch", action="store_true",
                         help="Continuously process only newly closed M1 bars (live MT5)")
+    parser.add_argument("--scan-begonya", action="store_true",
+                        help="Scan all active non-neutral Begonya symbols available in MT5")
     parser.add_argument("--interval-sec", type=int, default=15,
                         help="Watch polling interval in seconds (default: 15)")
     parser.add_argument("--allow-mean-reversion", action="store_true",
@@ -380,8 +492,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Spread/slippage cost in instrument points")
     parser.add_argument("--point-size", type=float, default=None,
                         help="Price units per point; inferred by symbol when omitted")
-    parser.add_argument("--trigger-tf", choices=("M1", "M5", "M15"), default="M1",
-                        help="Closed-candle timeframe used for POI trigger confirmation")
+    parser.add_argument("--trigger-tf", choices=("M1", "M5", "M15", "M30", "H1", "M60"), default=None,
+                        help="Closed-candle trigger timeframe; defaults to the instrument profile")
     parser.add_argument("--refresh-macro", action="store_true",
                         help="Refresh Begonya macro gate first if missing or stale")
     args = parser.parse_args(argv)
@@ -390,6 +502,11 @@ def main(argv: list[str] | None = None) -> int:
         print("MACRO_REFRESH: " + json.dumps(refresh_result, default=str), flush=True)
     if args.watch:
         return _watch(args)
+    if args.scan_begonya:
+        if args.dry_run:
+            raise ValueError("--scan-begonya requires a live MT5 connection; --dry-run is not supported")
+        _scan_begonya_once(args, notifier=ExecutionNotifier())
+        return 0
     point_size = args.point_size if args.point_size is not None else _default_point_size(args.symbol)
     cost_price = args.spread_points * point_size
     result = run_pipeline(

@@ -12,6 +12,7 @@ from pragma.instrument_profiles import (
     MOMENTUM_TREND,
     canonical_symbol,
     get_instrument_profile,
+    default_trigger_tf_for_symbol,
 )
 from pragma.regime_poi_engine import generate_regime_pois
 from pragma.trigger_engine import evaluate_trigger
@@ -52,6 +53,14 @@ class InstrumentProfileTests(unittest.TestCase):
         self.assertEqual(canonical_symbol("BTCUSDT"), "BTCUSD")
         self.assertEqual(get_instrument_profile("BTCUSDT").name, "CRYPTO_MOMENTUM")
         self.assertEqual(get_instrument_profile("EURCHFm"), FX_MEAN_REVERSION)
+
+    def test_crypto_trigger_timeframes_follow_whitelist_profiles(self):
+        for symbol in ("BTCUSDT", "BTC", "BTCUSD"):
+            with self.subTest(symbol=symbol):
+                self.assertEqual(default_trigger_tf_for_symbol(symbol), "M15")
+        for symbol in ("SOLUSDT", "SOL", "SOLUSD", "LINKUSDT", "LINK", "LINKUSD"):
+            with self.subTest(symbol=symbol):
+                self.assertEqual(default_trigger_tf_for_symbol(symbol), "M5")
 
     def test_profile_parameters_control_poi_radius_and_trend_permission(self):
         previous = {"pdPOC": 100.0, "pdVAH": 102.0, "pdVAL": 98.0, "pdLVN": []}

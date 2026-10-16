@@ -142,7 +142,15 @@ def get_instrument_profile(symbol: str) -> InstrumentProfile:
 
 
 def default_trigger_tf_for_symbol(symbol: str) -> str:
-    """Choose a symbol-aware default while preserving the shared momentum profile."""
-    if canonical_symbol(symbol) in _CRYPTO_SYMBOLS:
+    """Choose a symbol-aware default for the validated crypto whitelist."""
+    canonical = canonical_symbol(symbol)
+    crypto_trigger_tfs = {
+        "BTCUSD": "M15",
+        "SOLUSD": "M5",
+        "LINKUSD": "M5",
+    }
+    if canonical in crypto_trigger_tfs:
+        return crypto_trigger_tfs[canonical]
+    if canonical in _CRYPTO_SYMBOLS:
         return "M15"
     return get_instrument_profile(symbol).default_trigger_tf

@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from config.settings import DEFAULT_CRYPTO_SCAN_SYMBOLS
 from pragma.amt_engine import AMTEngine, calculate_session_profiles
 from pragma.data.mt5_data import MT5DataClient, filter_closed_bars
 from pragma.data.binance_data import BinanceDataClient, normalize_binance_symbol, btc_leader_allows_direction
@@ -563,7 +564,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--symbol", default="XAUUSD")
     parser.add_argument("--source", choices=("auto", "mt5", "binance"), default="auto")
     parser.add_argument("--no-cache", action="store_true", help="Disable Binance CSV cache")
-    parser.add_argument("--scan-crypto", action="store_true", help="Run a one-shot scan of major Binance USDT crypto pairs")
+    parser.add_argument("--scan-crypto", action="store_true", help="Run a one-shot scan of the default Binance USD-M Futures whitelist")
+    parser.add_argument("--crypto-symbols", nargs="+", default=None, help="Override the default crypto scan whitelist (for example: BTCUSDT SOLUSDT)")
     parser.add_argument("--btc-leader-filter", action="store_true", help="Suppress counter-BTC altcoin directions when BTC regime is strongly imbalanced")
     parser.add_argument("--bars", type=int, default=3000)
     parser.add_argument("--profile-bins", type=int, default=100)
@@ -606,7 +608,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.auto_direction:
         args.macro_bias = "auto"
     if args.scan_crypto:
-        symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT")
+        symbols = tuple(args.crypto_symbols) if args.crypto_symbols else DEFAULT_CRYPTO_SCAN_SYMBOLS
         reports = []
         btc_regime = None
         for crypto_symbol in symbols:

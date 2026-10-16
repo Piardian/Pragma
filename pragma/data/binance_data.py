@@ -107,6 +107,12 @@ class BinanceDataClient:
         self.sleep_seconds = max(0.0, float(sleep_seconds))
         self._opener = opener or urlopen
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
     @staticmethod
     def _cache_key(symbol: str, timeframe: str) -> str:
         return f"binance_{normalize_binance_symbol(symbol)}_{str(timeframe).upper()}.csv"
@@ -175,11 +181,9 @@ class BinanceDataClient:
         remaining = count
         if not cached.empty and not self.no_cache:
             latest_open_ms = int(cached.index[-1].timestamp() * 1000)
-            if latest_open_ms + interval_ms >= now_ms - interval_ms:
-                end_time = latest_open_ms + interval_ms * 2
-                remaining = max(0, count - len(cached.tail(count)))
-                if remaining == 0:
-                    return filter_closed_bars(cached.tail(count), tf)
+            end_time = now_ms if latest_open_ms + interval_ms < now_ms - interval_ms else latest_open_ms + interval_ms * 2
+            gap_bars = max(2, int(max(0, now_ms - latest_open_ms) // interval_ms) + 2)
+            remaining = min(count, gap_bars)
         # Page backward; API caps are 1500 futures / 1000 spot candles.
         while remaining > 0:
             page_limit = min(remaining, 1500)
@@ -204,4 +208,6 @@ class BinanceDataClient:
         fetched = filter_closed_bars(fetched, tf)
         if not self.no_cache:
             self._write_cache(cache_path, fetched)
-        return fetched.tail(count).copy()
+        result = fetched.tail(count).copy()
+        result.attrs["source"] = "binance"
+        return result

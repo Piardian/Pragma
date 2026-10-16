@@ -84,6 +84,8 @@ def evaluate_trigger(
     min_spread_to_sl_ratio: float = 4.0,
     min_rr_tp1: float = 1.0,
     min_rr_tp2: float = 1.35,
+    session_hours_utc: tuple[int, int] | None = None,
+    confirm_binance_delta: bool = True,
 ) -> TriggerDecision:
     """Evaluate closed M1 bars using POI touch, Z recovery and volume climax."""
     direction = direction.upper()
@@ -132,7 +134,8 @@ def evaluate_trigger(
         else:
             last_timestamp = last_timestamp.tz_convert("UTC")
         session_hour_utc = int(last_timestamp.hour)
-        session_start, session_end = ACTIVE_TRADING_HOURS_UTC
+        source_is_binance = str(bars.attrs.get("source", "")).lower() == "binance"
+        session_start, session_end = session_hours_utc or ((0, 24) if source_is_binance else ACTIVE_TRADING_HOURS_UTC)
         session_allowed = session_start <= session_hour_utc < session_end
 
     close = bars["close"]
@@ -149,6 +152,9 @@ def evaluate_trigger(
     touch_mask = (last_three["low"] <= poi_high) & (last_three["high"] >= poi_low)
     poi_touched = bool(touch_mask.any())
     last_five_z = z_score.iloc[-5:]
+    source_is_binance = str(bars.attrs.get("source", "")).lower() == "binance"
+    last_delta = float(bars["volume_delta"].iloc[-1]) if "volume_delta" in bars.columns else None
+    delta_ok = True
     if direction == "LONG":
         extreme_indices = list(last_five_z[last_five_z <= -abs(z_extreme)].index)
         z_turn = bool(pd.notna(last_z) and pd.notna(previous_z) and last_z > previous_z)
@@ -157,6 +163,9 @@ def evaluate_trigger(
         wick_ratio = (float(min(last["open"], last["close"]) - last["low"]) / candle_range
                       if candle_range > 0 else 0.0)
         rejection = bool(last["close"] > last["open"] or wick_ratio >= 0.40)
+        if confirm_binance_delta and source_is_binance and last_delta is not None:
+            delta_ok = last_delta > 0 or wick_ratio >= 0.60
+            rejection = rejection and delta_ok
         stop_loss = poi_low - float(sl_atr_buffer) * atr
         z_rule = f"Z<=-{abs(z_extreme):g} in last 5; current Z rises and >=-{abs(z_recovery):g}"
     else:
@@ -167,6 +176,9 @@ def evaluate_trigger(
         wick_ratio = (float(last["high"] - max(last["open"], last["close"])) / candle_range
                       if candle_range > 0 else 0.0)
         rejection = bool(last["close"] < last["open"] or wick_ratio >= 0.40)
+        if confirm_binance_delta and source_is_binance and last_delta is not None:
+            delta_ok = last_delta < 0 or wick_ratio >= 0.60
+            rejection = rejection and delta_ok
         stop_loss = poi_high + float(sl_atr_buffer) * atr
         z_rule = f"Z>=+{abs(z_extreme):g} in last 5; current Z falls and <=+{abs(z_recovery):g}"
 
@@ -270,6 +282,8 @@ def evaluate_trigger(
         "volume_climax": volume_ok,
         "volume_climax_position": int(climax_pos) if climax_pos is not None else None,
         "rejection": rejection,
+        "volume_delta": last_delta,
+        "binance_delta_confirmation": delta_ok,
         "volume_delta": last_delta,
         "binance_delta_confirmation": delta_ok,
         "rr_ratio": rr,

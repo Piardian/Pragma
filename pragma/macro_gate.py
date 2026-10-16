@@ -110,7 +110,7 @@ def _future_invalid(timestamp: datetime, now: datetime | None = None) -> bool:
 def _normalize_symbol(symbol: str) -> str:
     value = str(symbol).strip().upper()
     value = re.sub(r"\.(A|M|PRO)$", "", value)
-    value = value.replace("/", "").replace("_", "").replace("-", "")
+    value = value.replace("/", "").replace("_", "").replace("-", "").replace("=", "")
     if value == "GCF":
         return "XAUUSD"
     if value == "GOLD":
@@ -180,6 +180,8 @@ def _is_active(value: Any) -> bool:
 def _block_reason(payload: dict[str, Any], symbol_entry: Any = None) -> str | None:
     """Apply deterministic blocker precedence: EVENT_FREEZE, then SYSTEMIC_STRESS."""
     sources = [("payload", payload)]
+    if isinstance(symbol_entry, str) and symbol_entry.strip().upper() in _BLOCKING_GATES:
+        return f"{symbol_entry.strip().upper()} active (symbol)"
     if isinstance(symbol_entry, dict):
         sources.append(("symbol", symbol_entry))
     for wanted in ("EVENT_FREEZE", "SYSTEMIC_STRESS"):

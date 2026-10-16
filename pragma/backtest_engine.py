@@ -215,14 +215,23 @@ def _resample_tf(m1: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     timeframe = normalize_trigger_tf(timeframe)
     minutes = trigger_tf_minutes(timeframe)
     columns = ["open", "high", "low", "close", "tick_volume"]
+    has_delta = "volume_delta" in m1.columns
+    selected = columns + (["volume_delta"] if has_delta else [])
     if minutes == 1:
-        return m1[columns].copy()
-    return m1[columns].resample(
-        f"{minutes}min", label="left", closed="left", origin="start_day"
-    ).agg({
+        out = m1[selected].copy()
+        out.attrs.update(m1.attrs)
+        return out
+    aggregations = {
         "open": "first", "high": "max", "low": "min",
         "close": "last", "tick_volume": "sum",
-    }).dropna()
+    }
+    if has_delta:
+        aggregations["volume_delta"] = "sum"
+    out = m1[selected].resample(
+        f"{minutes}min", label="left", closed="left", origin="start_day"
+    ).agg(aggregations).dropna()
+    out.attrs.update(m1.attrs)
+    return out
 
 
 def _resample_m15(m1: pd.DataFrame) -> pd.DataFrame:

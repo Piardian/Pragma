@@ -282,7 +282,6 @@ def evaluate_trigger(
         "volume_climax_position": int(climax_pos) if climax_pos is not None else None,
         "rejection": rejection,
         "volume_delta": last_delta,
-        "volume_delta": last_delta,
         "binance_delta_confirmation": delta_ok,
         "rr_ratio": rr,
         "rr_tp1": rr_tp1,

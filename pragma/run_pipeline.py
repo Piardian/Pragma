@@ -197,7 +197,7 @@ def run_pipeline(
         trigger_minutes == 1 or
         (last_bar_time + pd.Timedelta(minutes=1)).minute % trigger_minutes == 0
     )
-    trigger_window = trigger_bars.iloc[-20:] if trigger_is_newly_closed else trigger_bars.iloc[0:0]
+    trigger_window = trigger_bars.iloc[-30:] if trigger_is_newly_closed else trigger_bars.iloc[0:0]
     current_price = float(last_bar["close"])
     if selected_source == "binance":
         cost_price = max(float(cost_price), current_price * 0.0004)

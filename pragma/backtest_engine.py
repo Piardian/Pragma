@@ -708,9 +708,10 @@ def main(argv: list[str] | None = None) -> int:
         now = pd.Timestamp.now(tz="UTC")
         m1 = filter_closed_bars(m1, "M1", now=now)
         m15 = filter_closed_bars(m15, "M15", now=now)
+    effective_spread = max(args.spread_points, float(m1["close"].iloc[-1]) * 0.0004 / point_size) if source == "binance" else args.spread_points
     report = run_backtest(
         m1, symbol=symbol, macro_bias=bias, m15_bars=m15,
-        profile_bins=args.profile_bins, spread_points=args.spread_points,
+        profile_bins=args.profile_bins, spread_points=effective_spread,
         point_size=point_size, allow_range=allow_range,
         allow_mean_reversion=True if args.allow_mean_reversion else None,
         disable_trend_pullback=args.disable_trend_pullback,

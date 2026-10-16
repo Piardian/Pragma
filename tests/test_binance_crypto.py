@@ -111,6 +111,46 @@ class BinanceCryptoTests(unittest.TestCase):
         self.assertTrue(allows("BALANCE", "SOLUSDT", "SHORT"))
         self.assertTrue(allows("IMBALANCE_BEAR", "BTCUSDT", "LONG"))
 
+    def test_partial_cache_backfill_and_exact_count(self):
+        # 20 bars available at 1m intervals
+        base_ms = 10_000_000
+        starts = [base_ms + i * 60_000 for i in range(20)]
+        def opener(request, timeout=15):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(request.full_url).query)
+            end = int(qs["endTime"][0]); limit = int(qs["limit"][0])
+            eligible = [t for t in starts if t + 59_999 <= end]
+            return _Response([_row(t) for t in eligible[-min(limit, len(eligible)):]])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = BinanceDataClient(cache_dir=tmp, no_cache=False, sleep_seconds=0, opener=opener)
+            fake_now = pd.Timestamp(datetime.fromtimestamp((starts[-1] + 120_000) / 1000, tz=timezone.utc))
+            with patch("pragma.data.binance_data.pd.Timestamp.now", return_value=fake_now):
+                # Request 5 bars first
+                df1 = client.rates("BTCUSDT", "M1", 5)
+                self.assertEqual(len(df1), 5)
+                # Next request 12 bars with partial cache (5 in cache)
+                df2 = client.rates("BTCUSDT", "M1", 12)
+                self.assertEqual(len(df2), 12)
+                self.assertEqual(len(df2.index.unique()), 12)
+
+    def test_request_page_retries_on_rate_limit(self):
+        attempts = 0
+        def flaking_opener(request, timeout=15):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                from urllib.error import HTTPError
+                raise HTTPError(request.full_url, 429, "Too Many Requests", {}, None)
+            return _Response([_row(1_000_000)])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = BinanceDataClient(cache_dir=tmp, sleep_seconds=0, opener=flaking_opener)
+            with patch("time.sleep", return_value=None):
+                rows = client._request_page("https://fapi.binance.com/fapi/v1/klines", "BTCUSDT", "1m", 2_000_000, 10)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(attempts, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

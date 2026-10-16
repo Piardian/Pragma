@@ -142,13 +142,27 @@ class BinanceDataClient:
         params = urlencode({"symbol": symbol, "interval": interval,
                             "endTime": end_time, "limit": limit})
         request = Request(f"{base_url}?{params}", headers={"User-Agent": "Pragma/1.0"})
-        with self._opener(request, timeout=self.timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        if isinstance(payload, dict):
-            raise BinanceDataError(f"Binance API error: {payload.get('msg', payload)}")
-        if not isinstance(payload, list):
-            raise BinanceDataError("Unexpected Binance response format")
-        return payload
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with self._opener(request, timeout=self.timeout) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                if isinstance(payload, dict):
+                    msg = payload.get("msg", payload)
+                    raise BinanceDataError(f"Binance API error: {msg}")
+                if not isinstance(payload, list):
+                    raise BinanceDataError("Unexpected Binance response format")
+                return payload
+            except HTTPError as exc:
+                if exc.code in (429, 418, 500, 502, 503, 504) and attempt < max_retries - 1:
+                    time.sleep(1.0 * (attempt + 1))
+                    continue
+                raise
+            except (URLError, TimeoutError, OSError) as exc:
+                if attempt < max_retries - 1:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise
 
     def _fetch_before(self, symbol: str, interval: str, end_time: int,
                       limit: int, *, force_spot: bool = False) -> tuple[pd.DataFrame, str]:
@@ -175,34 +189,59 @@ class BinanceDataClient:
         cached = self._read_cache(cache_path)
         now_ms = int(pd.Timestamp.now(tz="UTC").timestamp() * 1000)
         interval_ms = _INTERVAL_MS[interval]
-        # Incremental requests include overlap to recover the last bar safely.
-        end_time = now_ms
-        collected: list[pd.DataFrame] = []
-        remaining = count
+
+        frames: list[pd.DataFrame] = []
         if not cached.empty and not self.no_cache:
+            frames.append(cached)
             latest_open_ms = int(cached.index[-1].timestamp() * 1000)
-            end_time = now_ms if latest_open_ms + interval_ms < now_ms - interval_ms else latest_open_ms + interval_ms * 2
-            gap_bars = max(2, int(max(0, now_ms - latest_open_ms) // interval_ms) + 2)
-            remaining = min(count, max(gap_bars, count - len(cached)))
-        # Page backward; API caps are 1500 futures / 1000 spot candles.
-        while remaining > 0:
-            page_limit = min(remaining, 1500)
-            page, _ = self._fetch_before(symbol, interval, end_time, page_limit)
-            if page.empty:
-                break
-            collected.append(page)
-            oldest_ms = int(page.index[0].timestamp() * 1000)
-            remaining -= len(page)
-            if oldest_ms <= 0 or len(page) < min(page_limit, 1000):
-                break
-            end_time = oldest_ms - 1
-            if self.sleep_seconds and remaining > 0:
-                time.sleep(self.sleep_seconds)
-        fetched = pd.concat(collected).sort_index() if collected else pd.DataFrame()
-        if not cached.empty and not self.no_cache:
-            fetched = pd.concat([cached, fetched]).sort_index()
-        if fetched.empty:
+            # 1. Forward sync: fetch new bars up to now
+            if latest_open_ms + interval_ms < now_ms:
+                gap_bars = max(2, int((now_ms - latest_open_ms) // interval_ms) + 2)
+                new_page, _ = self._fetch_before(symbol, interval, now_ms, min(1500, gap_bars))
+                if not new_page.empty:
+                    frames.append(new_page)
+            curr = pd.concat(frames).sort_index()
+            curr = curr[~curr.index.duplicated(keep="last")]
+            closed_curr = filter_closed_bars(curr, tf)
+            # 2. Backward backfill: if requested count > available closed bars
+            if len(closed_curr) < count:
+                needed = count - len(closed_curr) + 2
+                oldest_ms = int(curr.index[0].timestamp() * 1000)
+                end_time = oldest_ms - 1
+                while needed > 0:
+                    page_limit = min(needed, 1500)
+                    page, _ = self._fetch_before(symbol, interval, end_time, page_limit)
+                    if page.empty:
+                        break
+                    frames.append(page)
+                    oldest_ms = int(page.index[0].timestamp() * 1000)
+                    needed -= len(page)
+                    if oldest_ms <= 0 or len(page) < min(page_limit, 1000):
+                        break
+                    end_time = oldest_ms - 1
+                    if self.sleep_seconds and needed > 0:
+                        time.sleep(self.sleep_seconds)
+        else:
+            # Cold fetch: page backward from now until at least count + 2 closed bars collected
+            remaining = count + 2
+            end_time = now_ms
+            while remaining > 0:
+                page_limit = min(remaining, 1500)
+                page, _ = self._fetch_before(symbol, interval, end_time, page_limit)
+                if page.empty:
+                    break
+                frames.append(page)
+                oldest_ms = int(page.index[0].timestamp() * 1000)
+                remaining -= len(page)
+                if oldest_ms <= 0 or len(page) < min(page_limit, 1000):
+                    break
+                end_time = oldest_ms - 1
+                if self.sleep_seconds and remaining > 0:
+                    time.sleep(self.sleep_seconds)
+
+        if not frames:
             raise BinanceDataError(f"No Binance klines returned for {symbol} {tf}")
+        fetched = pd.concat(frames).sort_index()
         fetched = fetched[~fetched.index.duplicated(keep="last")]
         # Closed-bar filter is based on exchange close_time, not local candle assumptions.
         fetched = filter_closed_bars(fetched, tf)

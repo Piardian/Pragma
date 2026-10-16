@@ -402,8 +402,7 @@ def _scan_begonya_once(args: argparse.Namespace, notifier: Any | None = None) ->
                 "result": None,
             }
         results.append(row)
-    print("
-BEGONYA ACTIVE SYMBOL SCAN")
+    print("\nBEGONYA ACTIVE SYMBOL SCAN")
     print(f"{'SYMBOL':<14} {'BIAS':<6} {'PROFILE':<20} {'TF':<5} {'REGIME':<18} {'POI':>4}  STATUS")
     for row in results:
         bias_label = "LONG" if row["bias"] > 0 else "SHORT"
@@ -489,8 +488,7 @@ def _watch(args: argparse.Namespace) -> int:
                                 }
                         elif symbol in last_scan_rows:
                             last_scan_rows[symbol]["bias"] = bias
-                    print("
-BEGONYA WATCH SCAN")
+                    print("\nBEGONYA WATCH SCAN")
                     print(f"{'SYMBOL':<14} {'BIAS':<6} {'PROFILE':<20} {'TF':<5} {'REGIME':<18} {'POI':>4}  STATUS")
                     for symbol, _bias in active_symbols:
                         row = last_scan_rows.get(symbol)

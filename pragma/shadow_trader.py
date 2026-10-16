@@ -204,8 +204,9 @@ class PaperTradingBook:
         stop = float(position["stop_loss"])
         # Conservative OHLC convention: if SL and target are both touched, SL wins.
         if self._bar_hits(bar, direction, stop, "sl"):
-            self._realize(symbol, stamp, position, stop, float(position["remaining_fraction"]), "SL")
-            return [{"type": "CLOSE", "symbol": symbol, "outcome": "SL", "time": stamp}]
+            outcome = "BE" if position.get("tp1_done") and abs(stop - float(position["entry_price"])) <= 1e-12 else "SL"
+            self._realize(symbol, stamp, position, stop, float(position["remaining_fraction"]), outcome)
+            return [{"type": "CLOSE", "symbol": symbol, "outcome": outcome, "time": stamp}]
         tp1, tp2 = float(position["take_profit_1"]), float(position["take_profit_2"])
         distinct = abs(tp2 - tp1) > 1e-12
         if not position["tp1_done"] and self._bar_hits(bar, direction, tp1, "tp"):

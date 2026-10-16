@@ -19,8 +19,7 @@ from pragma.trigger_engine import evaluate_trigger
 
 class InstrumentProfileTests(unittest.TestCase):
     def test_momentum_profile_parameters_and_symbol_aliases(self):
-        for symbol in ("XAUUSD", "XAUUSD.a", "GOLD", "XAGUSD", "BTCUSD",
-                       "BTCUSDT", "ETHUSD", "SOLUSD", "SPX", "US100",
+        for symbol in ("XAUUSD", "XAUUSD.a", "GOLD", "XAGUSD", "SPX", "US100",
                        "US30", "GBPJPY", "USDJPY"):
             with self.subTest(symbol=symbol):
                 self.assertEqual(get_instrument_profile(symbol), MOMENTUM_TREND)

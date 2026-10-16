@@ -110,5 +110,50 @@ class PipelineE2ETests(unittest.TestCase):
             run_pipeline(dry_run=True, macro_bias=2)
 
 
+class BegonyaBlacklistAndWatchTests(unittest.TestCase):
+    @patch("pragma.run_pipeline.MacroGate")
+    @patch("pragma.run_pipeline.MT5DataClient")
+    def test_begonya_symbols_exclude_blacklisted_by_default(self, mock_client_cls, mock_gate_cls):
+        from pragma.macro_gate import Bias, MacroDecision
+        from pragma.run_pipeline import _active_begonya_mt5_symbols
+
+        mock_gate = mock_gate_cls.return_value
+        mock_gate.gate_symbols.return_value = ["EURUSD", "GBPUSD", "NZDUSD", "USDJPY"]
+        mock_gate.get_bias.side_effect = lambda s: MacroDecision(
+            bias=Bias.LONG, reason="TREND", gate="BULL", timestamp=None
+        )
+
+        mock_client = mock_client_cls.return_value.__enter__.return_value
+        mock_client.symbols.return_value = ["EURUSD", "GBPUSD", "NZDUSD", "USDJPY"]
+
+        # Default: blacklist should filter GBPUSD and NZDUSD
+        active = _active_begonya_mt5_symbols(include_blacklisted=False)
+        symbols = [s for s, _ in active]
+        self.assertIn("EURUSD", symbols)
+        self.assertIn("USDJPY", symbols)
+        self.assertNotIn("GBPUSD", symbols)
+        self.assertNotIn("NZDUSD", symbols)
+
+        # Override with include_blacklisted=True
+        active_all = _active_begonya_mt5_symbols(include_blacklisted=True)
+        symbols_all = [s for s, _ in active_all]
+        self.assertIn("GBPUSD", symbols_all)
+        self.assertIn("NZDUSD", symbols_all)
+
+    def test_include_blacklisted_cli_argument(self):
+        import argparse
+        from pragma.run_pipeline import main
+        # Verify parser handles --include-blacklisted
+        # We test with --help or parsing args
+        import sys
+        from unittest.mock import patch
+        with patch.object(sys, "argv", ["run_pipeline", "--scan-begonya", "--include-blacklisted"]):
+            with patch("pragma.run_pipeline._scan_begonya_once") as mock_scan:
+                main(["--scan-begonya", "--include-blacklisted"])
+                mock_scan.assert_called_once()
+                args_passed = mock_scan.call_args[0][0]
+                self.assertTrue(args_passed.include_blacklisted)
+
+
 if __name__ == "__main__":
     unittest.main()

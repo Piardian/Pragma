@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from config.settings import DEFAULT_CRYPTO_SCAN_SYMBOLS
+from config.settings import BLACKLIST_FOREX_SYMBOLS, DEFAULT_CRYPTO_SCAN_SYMBOLS
 from pragma.amt_engine import AMTEngine, calculate_session_profiles
 from pragma.data.mt5_data import MT5DataClient, filter_closed_bars
 from pragma.data.binance_data import BinanceDataClient, normalize_binance_symbol, btc_leader_allows_direction
@@ -365,15 +365,18 @@ def _latest_closed_m1_time(symbol: str) -> pd.Timestamp | None:
     return None if closed.empty else pd.Timestamp(closed.index[-1])
 
 
-def _active_begonya_mt5_symbols() -> list[tuple[str, int]]:
+def _active_begonya_mt5_symbols(include_blacklisted: bool = False) -> list[tuple[str, int]]:
     """Return broker symbols that have a fresh, non-neutral Begonya bias."""
     gate = MacroGate()
     active: dict[str, int] = {}
     for gate_symbol in gate.gate_symbols():
+        canon = canonical_symbol(gate_symbol)
+        if not include_blacklisted and canon in BLACKLIST_FOREX_SYMBOLS:
+            continue
         decision = gate.get_bias(gate_symbol)
         bias = int(decision.bias)
         if bias:
-            active[canonical_symbol(gate_symbol)] = bias
+            active[canon] = bias
     if not active:
         return []
     with MT5DataClient() as client:
@@ -381,6 +384,8 @@ def _active_begonya_mt5_symbols() -> list[tuple[str, int]]:
     matched: dict[str, str] = {}
     for broker_symbol in broker_symbols:
         key = canonical_symbol(broker_symbol)
+        if not include_blacklisted and key in BLACKLIST_FOREX_SYMBOLS:
+            continue
         if key in active and key not in matched:
             matched[key] = broker_symbol
     return sorted(
@@ -391,7 +396,8 @@ def _active_begonya_mt5_symbols() -> list[tuple[str, int]]:
 
 def _scan_begonya_once(args: argparse.Namespace, notifier: Any | None = None) -> list[dict[str, Any]]:
     """Run one sequential pass over all active Begonya symbols present in MT5."""
-    symbols = _active_begonya_mt5_symbols()
+    include_blacklisted = bool(getattr(args, "include_blacklisted", False))
+    symbols = _active_begonya_mt5_symbols(include_blacklisted=include_blacklisted)
     if not symbols:
         print("BEGONYA SCAN | no active non-neutral gate symbols found in MT5", flush=True)
         return []
@@ -462,25 +468,31 @@ def _watch(args: argparse.Namespace) -> int:
         while True:
             try:
                 if args.scan_begonya:
-                    active_symbols = _active_begonya_mt5_symbols()
+                    include_blacklisted = bool(getattr(args, "include_blacklisted", False))
+                    active_symbols = _active_begonya_mt5_symbols(include_blacklisted=include_blacklisted)
                     active_names = {symbol for symbol, _ in active_symbols}
                     for stale_symbol in set(last_scan_rows) - active_names:
                         last_scan_rows.pop(stale_symbol, None)
                     if not active_symbols:
                         print("BEGONYA SCAN | no active non-neutral gate symbols found in MT5", flush=True)
+                    any_updated = False
                     for symbol, bias in active_symbols:
                         latest_time = _latest_closed_m1_time(symbol)
                         if latest_time is None:
-                            last_scan_rows[symbol] = {
-                                "symbol": symbol, "bias": bias,
-                                "profile": get_instrument_profile(symbol).name,
-                                "trigger_tf": normalize_trigger_tf(
-                                    args.trigger_tf or default_trigger_tf_for_symbol(symbol)
-                                ),
-                                "regime": "-", "pois": 0, "status": "NO_CLOSED_BAR",
-                            }
+                            if symbol not in last_scan_rows:
+                                last_scan_rows[symbol] = {
+                                    "symbol": symbol, "bias": bias,
+                                    "profile": get_instrument_profile(symbol).name,
+                                    "trigger_tf": normalize_trigger_tf(
+                                        args.trigger_tf or default_trigger_tf_for_symbol(symbol)
+                                    ),
+                                    "regime": "-", "pois": 0, "status": "NO_CLOSED_BAR",
+                                }
+                            else:
+                                last_scan_rows[symbol]["bias"] = bias
                             continue
                         if latest_time.isoformat() != last_processed.get(symbol):
+                            any_updated = True
                             try:
                                 result = run_pipeline(
                                     symbol=symbol, bars_count=args.bars,
@@ -515,18 +527,19 @@ def _watch(args: argparse.Namespace) -> int:
                                 }
                         elif symbol in last_scan_rows:
                             last_scan_rows[symbol]["bias"] = bias
-                    print("\nBEGONYA WATCH SCAN")
-                    print(f"{'SYMBOL':<14} {'BIAS':<6} {'PROFILE':<20} {'TF':<5} {'REGIME':<18} {'POI':>4}  STATUS")
-                    for symbol, _bias in active_symbols:
-                        row = last_scan_rows.get(symbol)
-                        if not row:
-                            continue
-                        bias_label = "LONG" if row["bias"] > 0 else "SHORT"
-                        print(
-                            f"{symbol:<14} {bias_label:<6} {row['profile']:<20} "
-                            f"{row['trigger_tf']:<5} {row['regime']:<18} {row['pois']:>4}  {row['status']}",
-                            flush=True,
-                        )
+                    if any_updated:
+                        print("\nBEGONYA WATCH SCAN")
+                        print(f"{'SYMBOL':<14} {'BIAS':<6} {'PROFILE':<20} {'TF':<5} {'REGIME':<18} {'POI':>4}  STATUS")
+                        for symbol, _bias in active_symbols:
+                            row = last_scan_rows.get(symbol)
+                            if not row:
+                                continue
+                            bias_label = "LONG" if row["bias"] > 0 else "SHORT"
+                            print(
+                                f"{symbol:<14} {bias_label:<6} {row['profile']:<20} "
+                                f"{row['trigger_tf']:<5} {row['regime']:<18} {row['pois']:>4}  {row['status']}",
+                                flush=True,
+                            )
                 else:
                     latest_time = _latest_closed_m1_time(args.symbol)
                     if latest_time is not None and latest_time.isoformat() != last_processed.get(args.symbol):
@@ -579,6 +592,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Continuously process only newly closed M1 bars (live MT5)")
     parser.add_argument("--scan-begonya", action="store_true",
                         help="Scan all active non-neutral Begonya symbols available in MT5")
+    parser.add_argument("--include-blacklisted", action="store_true",
+                        help="Include blacklisted Forex symbols (GBPUSD, NZDUSD) in Begonya scans")
     parser.add_argument("--interval-sec", type=int, default=15,
                         help="Watch polling interval in seconds (default: 15)")
     parser.add_argument("--allow-mean-reversion", action="store_true",

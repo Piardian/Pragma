@@ -290,7 +290,7 @@ def run_pipeline(
             "metrics": decision.metrics,
             "poi_type": poi.poi_type,
         })
-        if decision.execute:
+        if decision.execute and notify_pois:
             notifications.append(notifier_instance.notify(
                 symbol, poi, decision, regime_decision.regime, last_bar_time
             ))

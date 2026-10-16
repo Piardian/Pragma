@@ -45,18 +45,6 @@ FX_MEAN_REVERSION = InstrumentProfile(
     default_trigger_tf="M5",
 )
 
-CRYPTO_MOMENTUM = InstrumentProfile(
-    name="CRYPTO_MOMENTUM",
-    allow_trend_pullback=True,
-    allow_mean_reversion=False,
-    poi_atr_multiplier=0.35,
-    sl_atr_buffer=0.50,
-    imbalance_vwap_poc_atr=0.15,
-    mean_reversion_confluence_atr=0.75,
-    min_spread_to_sl_ratio=4.0,
-    default_trigger_tf="M15",
-)
-
 TRIGGER_TIMEFRAME_MINUTES = {
     "M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 60, "M60": 60,
 }
@@ -124,10 +112,16 @@ def get_instrument_profile(symbol: str) -> InstrumentProfile:
     defaults for backward compatibility with Pragma's prior XAUUSD behavior.
     """
     canonical = canonical_symbol(symbol)
-    if canonical in {"BTCUSD", "ETHUSD", "SOLUSD"}:
-        return CRYPTO_MOMENTUM
     if canonical in _MOMENTUM_SYMBOLS:
         return MOMENTUM_TREND
     if _is_fx_cross(canonical):
         return FX_MEAN_REVERSION
     return MOMENTUM_TREND
+
+
+
+def default_trigger_tf_for_symbol(symbol: str) -> str:
+    """Choose a symbol-aware default while preserving the shared momentum profile."""
+    if canonical_symbol(symbol) in {"BTCUSD", "ETHUSD", "SOLUSD"}:
+        return "M15"
+    return get_instrument_profile(symbol).default_trigger_tf

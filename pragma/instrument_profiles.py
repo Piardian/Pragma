@@ -46,7 +46,25 @@ FX_MEAN_REVERSION = InstrumentProfile(
     default_trigger_tf="M5",
 )
 
-CRYPTO_MOMENTUM = InstrumentProfile(\n    name="CRYPTO_MOMENTUM",\n    allow_trend_pullback=True,\n    allow_mean_reversion=False,\n    poi_atr_multiplier=0.35,\n    sl_atr_buffer=0.50,\n    imbalance_vwap_poc_atr=0.15,\n    mean_reversion_confluence_atr=0.75,\n    min_spread_to_sl_ratio=4.0,\n    default_trigger_tf="M15",\n    active_hours_utc=(0, 24),\n)\n\n_CRYPTO_SYMBOLS = frozenset({\n    "BTCUSD", "ETHUSD", "SOLUSD", "BNBUSD", "XRPUSD", "DOGEUSD",\n    "ADAUSD", "AVAXUSD", "LINKUSD", "SUIUSD",\n})\n\nTRIGGER_TIMEFRAME_MINUTES = {
+CRYPTO_MOMENTUM = InstrumentProfile(
+    name="CRYPTO_MOMENTUM",
+    allow_trend_pullback=True,
+    allow_mean_reversion=False,
+    poi_atr_multiplier=0.35,
+    sl_atr_buffer=0.50,
+    imbalance_vwap_poc_atr=0.15,
+    mean_reversion_confluence_atr=0.75,
+    min_spread_to_sl_ratio=4.0,
+    default_trigger_tf="M15",
+    active_hours_utc=(0, 24),
+)
+
+_CRYPTO_SYMBOLS = frozenset({
+    "BTCUSD", "ETHUSD", "SOLUSD", "BNBUSD", "XRPUSD", "DOGEUSD",
+    "ADAUSD", "AVAXUSD", "LINKUSD", "SUIUSD",
+})
+
+TRIGGER_TIMEFRAME_MINUTES = {
     "M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 60, "M60": 60,
 }
 

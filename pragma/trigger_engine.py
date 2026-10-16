@@ -57,6 +57,8 @@ def evaluate_trigger(
     poi_type: str | None = None,
     center_price: float | None = None,
     cost_price: float = 0.0,
+    sl_atr_buffer: float = 0.50,
+    min_spread_to_sl_ratio: float = 4.0,
 ) -> TriggerDecision:
     """Evaluate closed M1 bars using POI touch, Z recovery and volume climax."""
     direction = direction.upper()
@@ -83,6 +85,10 @@ def evaluate_trigger(
         raise ValueError("atr_14 must be a finite number greater than zero")
     if min_rr <= 0 or volume_multiplier <= 0:
         raise ValueError("min_rr and volume_multiplier must be positive")
+    if not isfinite(float(sl_atr_buffer)) or float(sl_atr_buffer) < 0:
+        raise ValueError("sl_atr_buffer must be finite and non-negative")
+    if not isfinite(float(min_spread_to_sl_ratio)) or float(min_spread_to_sl_ratio) <= 0:
+        raise ValueError("min_spread_to_sl_ratio must be finite and positive")
     if not isfinite(float(cost_price)) or float(cost_price) < 0:
         raise ValueError("cost_price must be finite and non-negative")
     cost_price = float(cost_price)
@@ -120,7 +126,7 @@ def evaluate_trigger(
         wick_ratio = (float(min(last["open"], last["close"]) - last["low"]) / candle_range
                       if candle_range > 0 else 0.0)
         rejection = bool(last["close"] > last["open"] or wick_ratio >= 0.40)
-        stop_loss = poi_low - 0.5 * atr
+        stop_loss = poi_low - float(sl_atr_buffer) * atr
         z_rule = f"Z<=-{abs(z_extreme):g} in last 5; current Z rises and >=-{abs(z_recovery):g}"
     else:
         extreme_indices = list(last_five_z[last_five_z >= abs(z_extreme)].index)
@@ -130,7 +136,7 @@ def evaluate_trigger(
         wick_ratio = (float(last["high"] - max(last["open"], last["close"])) / candle_range
                       if candle_range > 0 else 0.0)
         rejection = bool(last["close"] < last["open"] or wick_ratio >= 0.40)
-        stop_loss = poi_high + 0.5 * atr
+        stop_loss = poi_high + float(sl_atr_buffer) * atr
         z_rule = f"Z>=+{abs(z_extreme):g} in last 5; current Z falls and <=+{abs(z_recovery):g}"
 
     entry = float(last["close"])
@@ -234,7 +240,9 @@ def evaluate_trigger(
         "cost_price": cost_price,
         "session_hour_utc": session_hour_utc,
         "session_allowed": session_allowed,
-        "high_spread_to_sl": bool(cost_price > 0 and risk < 4.0 * cost_price),
+        "high_spread_to_sl": bool(cost_price > 0 and risk < float(min_spread_to_sl_ratio) * cost_price),
+        "min_spread_to_sl_ratio": float(min_spread_to_sl_ratio),
+        "sl_atr_buffer": float(sl_atr_buffer),
         "stop_loss": stop_loss,
         "take_profit_1": tp1,
         "take_profit_2": tp2,
@@ -246,7 +254,7 @@ def evaluate_trigger(
 
     if not session_allowed:
         return decision(False, "SESSION_HOURS")
-    if cost_price > 0 and risk < 4.0 * cost_price:
+    if cost_price > 0 and risk < float(min_spread_to_sl_ratio) * cost_price:
         return decision(False, "HIGH_SPREAD_TO_SL")
     if not poi_touched:
         return decision(False, "OUTSIDE_POI")

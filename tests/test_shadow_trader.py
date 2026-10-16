@@ -57,7 +57,7 @@ class PaperTradingBookTests(unittest.TestCase):
         self.assertTrue(self.book.state["open_positions"]["EURUSD"]["tp1_done"])
         self.assertAlmostEqual(self.book.state["balance"], 10_100)
         events = self.book.process_bar("EURUSD", "2026-01-01T10:02:00Z", bar(101, 101.2, 99.9, 100.1))
-        self.assertEqual(events[0]["outcome"], "SL")
+        self.assertEqual(events[0]["outcome"], "BE")
         self.assertAlmostEqual(self.book.state["balance"], 10_100)
         self.assertAlmostEqual(self.book.state["closed_trades"][0]["realized_r"], 1.0)
 

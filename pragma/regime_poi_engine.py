@@ -220,7 +220,8 @@ def generate_regime_pois(
             if match:
                 add("LONG", "LONG_MEAN_REVERSION", match[0],
                     (lower_1, vwap_value, poc), match[1])
-            elif (level_name == "pdVAL" and macro_bias == 1
+            elif (level_name == "pdVAL"
+                  and (macro_bias == 1 or (macro_bias == 0 and allow_range))
                   and abs(price - val) <= half_width and price <= vwap_value):
                 add("LONG", "LONG_MEAN_REVERSION", val,
                     (lower_1, vwap_value, poc), ("pdVAL", "direct_level_touch", "vwap_midpoint"))
@@ -266,7 +267,8 @@ def generate_regime_pois(
             if match:
                 add("SHORT", "SHORT_MEAN_REVERSION", match[0],
                     (upper_1, vwap_value, poc), match[1])
-            elif (level_name == "pdVAH" and macro_bias == -1
+            elif (level_name == "pdVAH"
+                  and (macro_bias == -1 or (macro_bias == 0 and allow_range))
                   and abs(price - vah) <= half_width and price >= vwap_value):
                 add("SHORT", "SHORT_MEAN_REVERSION", vah,
                     (upper_1, vwap_value, poc), ("pdVAH", "direct_level_touch", "vwap_midpoint"))

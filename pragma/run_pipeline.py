@@ -109,6 +109,8 @@ def run_pipeline(
     disable_trend_pullback: bool = False,
     cost_price: float = 0.0,
     trigger_tf: str | None = None,
+    source: str = "auto",
+    no_cache: bool = False,
 ) -> dict[str, Any]:
     """Run all analytical layers and return a JSON-serializable report."""
     clock = pd.Timestamp(now if now is not None else datetime.now(timezone.utc))
@@ -142,11 +144,24 @@ def run_pipeline(
         macro_source = "cli"
         macro_reason = "Explicit command-line override"
 
+    selected_source = ("binance" if str(symbol).upper().endswith("USDT") else "mt5") if source == "auto" else source
+    if selected_source not in ("mt5", "binance"):
+        raise ValueError("source must be auto, mt5, or binance")
+    if selected_source == "binance":
+        symbol = normalize_binance_symbol(symbol)
     if dry_run:
         raw_m1 = _synthetic_bars(clock)
         m1 = filter_closed_bars(raw_m1, "M1", now=clock)
         session_key = "session"
         m15 = _closed_m15_from_m1(m1, clock)
+    elif selected_source == "binance":
+        with BinanceDataClient(no_cache=no_cache) as client:
+            raw_m1 = client.rates(symbol, "M1", bars_count)
+            raw_m15 = client.rates(symbol, "M15", max(200, bars_count // 15 + 50))
+        raw_m1.attrs["source"] = "binance"
+        raw_m15.attrs["source"] = "binance"
+        m1 = filter_closed_bars(raw_m1, "M1", now=clock)
+        m15 = filter_closed_bars(raw_m15, "M15", now=clock)
     else:
         with MT5DataClient() as client:
             raw_m1 = client.rates(symbol, "M1", bars_count)
@@ -552,6 +567,31 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--scan-begonya requires a live MT5 connection; --dry-run is not supported")
         _scan_begonya_once(args, notifier=ExecutionNotifier())
         return 0
+    if args.scan_crypto:
+        symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT")
+        reports = []
+        for crypto_symbol in symbols:
+            try:
+                report = run_pipeline(symbol=crypto_symbol, bars_count=args.bars, profile_bins=args.profile_bins,
+                    macro_bias=args.macro_bias if args.macro_bias is not None else 1, dry_run=False,
+                    trigger_tf=args.trigger_tf, source="binance", no_cache=args.no_cache)
+                report["symbol"] = crypto_symbol
+                reports.append(report)
+            except Exception as exc:
+                reports.append({"symbol": crypto_symbol, "error": str(exc)})
+        if args.btc_leader_filter and reports and isinstance(reports[0], dict):
+            btc_regime = str(reports[0].get("regime", "")).upper()
+            for report in reports[1:]:
+                if not isinstance(report, dict):
+                    continue
+                for trigger in report.get("triggers", []):
+                    direction = trigger.get("direction")
+                    if direction and not btc_leader_allows_direction(btc_regime, report.get("symbol", ""), direction):
+                        trigger["execute"] = False
+                        trigger["reason"] = "BTC_LEADER_FILTER"
+                report["btc_leader_regime"] = btc_regime
+        print(json.dumps(reports, indent=2, default=str))
+        return 0
     point_size = args.point_size if args.point_size is not None else _default_point_size(args.symbol)
     cost_price = args.spread_points * point_size
     result = run_pipeline(
@@ -559,7 +599,7 @@ def main(argv: list[str] | None = None) -> int:
         macro_bias=args.macro_bias, dry_run=args.dry_run,
         allow_mean_reversion=True if args.allow_mean_reversion else None,
         disable_trend_pullback=args.disable_trend_pullback, cost_price=cost_price,
-        trigger_tf=args.trigger_tf,
+        trigger_tf=args.trigger_tf, source=args.source, no_cache=args.no_cache,
     )
     print(json.dumps(result, indent=2, default=str))
     return 0

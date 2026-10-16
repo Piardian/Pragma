@@ -95,7 +95,9 @@ def evaluate_trigger(
         raise ValueError(f"Missing columns: {sorted(missing)}")
     if len(m1_bars) < 30:
         raise ValueError("At least 30 closed M1 bars are required")
-    extra = ["volume_delta"] if "volume_delta" in m1_bars.columns else []\n    bars = m1_bars.loc[:, ["open", "high", "low", "close", "tick_volume", *extra]].tail(30).astype(float).copy()\n    bars.attrs.update(m1_bars.attrs)
+    extra = ["volume_delta"] if "volume_delta" in m1_bars.columns else []
+    bars = m1_bars.loc[:, ["open", "high", "low", "close", "tick_volume", *extra]].tail(30).astype(float).copy()
+    bars.attrs.update(m1_bars.attrs)
     if not np.isfinite(bars.to_numpy()).all():
         raise ValueError("M1 bars contain NaN or infinite values")
     if (bars["high"] < bars["low"]).any():
@@ -267,7 +269,9 @@ def evaluate_trigger(
         "volume_multiplier": volume_factor if isfinite(volume_factor) else None,
         "volume_climax": volume_ok,
         "volume_climax_position": int(climax_pos) if climax_pos is not None else None,
-        "rejection": rejection,\n        "volume_delta": last_delta,\n        "binance_delta_confirmation": delta_ok,
+        "rejection": rejection,
+        "volume_delta": last_delta,
+        "binance_delta_confirmation": delta_ok,
         "rr_ratio": rr,
         "rr_tp1": rr_tp1,
         "rr_tp2": rr_tp2,

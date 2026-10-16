@@ -1,0 +1,67 @@
+name: Phase 12 Crypto Walk-Forward Matrix
+
+on:
+  push:
+    branches:
+      - feat/phase12-auto-crypto-regime
+    paths:
+      - "pragma/**"
+      - "tests/**"
+      - ".github/workflows/phase12-crypto-matrix.yml"
+  workflow_dispatch:
+
+jobs:
+  crypto-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip numpy pandas
+      - name: Run 8-symbol M5/M15 walk-forward matrix
+        run: |
+          mkdir -p artifacts
+          python -m pragma.backtest_engine --source binance --scan-crypto --auto-direction --bars 100000 --profile-bins 100 > artifacts/phase12_crypto_matrix.json
+      - name: Build comparison table
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          source = Path("artifacts/phase12_crypto_matrix.json")
+          if not source.exists():
+              Path("artifacts/phase12_crypto_matrix.md").write_text("Backtest did not produce a JSON report. Inspect workflow logs.\n")
+              raise SystemExit(0)
+          rows = json.loads(source.read_text())
+          lines = [
+              "# Phase 12 Crypto Walk-Forward Matrix",
+              "",
+              "Data target: Binance USD-M Futures, >=100,000 closed M1 bars per symbol; 4 bps adverse cost per side; causal auto-direction.",
+              "",
+              "| Symbol | Trigger TF | Bars | Trades | Win rate | Profit factor | Net R | Expectancy R | Max DD R | Status |",
+              "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+          ]
+          for row in rows:
+              if "error" in row:
+                  lines.append(f"| {row.get('symbol','?')} | — | — | — | — | — | — | — | — | ERROR: {row['error']} |")
+                  continue
+              lines.append(
+                  f"| {row['symbol']} | {row.get('trigger_tf','?')} | {row.get('actual_m1_bars', row.get('bars_processed','?'))} | "
+                  f"{row.get('total_trades','?')} | {row.get('win_rate',0):.2%} | {row.get('profit_factor',0):.3f} | "
+                  f"{row.get('net_r',0):.3f} | {row.get('expectancy_r',0):.4f} | {row.get('max_drawdown_r',0):.3f} | OK |"
+              )
+          Path("artifacts/phase12_crypto_matrix.md").write_text("\n".join(lines) + "\n")
+          print("\n".join(lines))
+          PY
+      - name: Upload raw data and summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase12-crypto-backtest-matrix
+          path: artifacts/
+          if-no-files-found: warn

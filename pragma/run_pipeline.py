@@ -456,13 +456,14 @@ def _watch(args: argparse.Namespace) -> int:
     last_processed: dict[str, str] = {}
     last_scan_rows: dict[str, dict[str, Any]] = {}
     if args.scan_begonya:
-        print(f"PRAGMA WATCH started | mode=Begonya multi-symbol scan | poll={args.interval_sec}s")
+        print(f"PRAGMA WATCH started | mode=Begonya multi-symbol scan | poll={args.interval_sec}s", flush=True)
     else:
         profile = get_instrument_profile(args.symbol)
         print(
             f"PRAGMA WATCH started | symbol={args.symbol} | profile={profile.name} | "
             f"trigger_tf={normalize_trigger_tf(args.trigger_tf or profile.default_trigger_tf)} | "
-            f"poll={args.interval_sec}s"
+            f"poll={args.interval_sec}s",
+            flush=True,
         )
     try:
         while True:

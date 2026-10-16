@@ -125,7 +125,7 @@ def classify_regime(current_price: float, previous_profile: Any,
 
 
 def generate_regime_pois(
-    macro_bias: int, previous_profile: Any, vwap: Any,
+    macro_bias: int | str, previous_profile: Any, vwap: Any,
     current_price: float, atr_14: float, *, allow_range: bool = False,
     allow_mean_reversion: bool = False, allow_trend_pullback: bool = True,
     poi_atr_multiplier: float = 0.35, imbalance_vwap_poc_atr: float = 0.15,
@@ -322,7 +322,7 @@ def generate_regime_pois(
 
 
 class RegimePOIEngine:
-    def evaluate(self, macro_bias: int, previous_profile: Any, vwap: Any,
+    def evaluate(self, macro_bias: int | str, previous_profile: Any, vwap: Any,
                  current_price: float, atr_14: float, *,
                  allow_range: bool = False,
                  allow_mean_reversion: bool = False,

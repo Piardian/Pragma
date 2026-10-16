@@ -2,7 +2,11 @@ import unittest
 
 import numpy as np
 import pandas as pd
+from types import SimpleNamespace
+from unittest.mock import patch
 
+from pragma import backtest_engine
+from pragma.run_pipeline import run_pipeline
 from pragma.instrument_profiles import (
     FX_MEAN_REVERSION,
     MOMENTUM_TREND,
@@ -45,6 +49,7 @@ class InstrumentProfileTests(unittest.TestCase):
         self.assertEqual(canonical_symbol("XAUUSD.a"), "XAUUSD")
         self.assertEqual(canonical_symbol("GC=F"), "XAUUSD")
         self.assertEqual(canonical_symbol("BTCUSDT"), "BTCUSD")
+        self.assertEqual(get_instrument_profile("EURCHFm"), FX_MEAN_REVERSION)
 
     def test_profile_parameters_control_poi_radius_and_trend_permission(self):
         previous = {"pdPOC": 100.0, "pdVAH": 102.0, "pdVAL": 98.0, "pdLVN": []}
@@ -72,6 +77,31 @@ class InstrumentProfileTests(unittest.TestCase):
             imbalance_vwap_poc_atr=FX_MEAN_REVERSION.imbalance_vwap_poc_atr,
         )
         self.assertFalse(any("TREND_PULLBACK" in p.poi_type for p in disabled.pois))
+
+    def test_pipeline_and_backtest_report_profile_names(self):
+        pipeline_report = run_pipeline(
+            dry_run=True, symbol="EURUSD", macro_bias=1,
+            now=pd.Timestamp("2026-10-15T16:00:00Z"),
+        )
+        self.assertEqual(pipeline_report["instrument_profile"], "FX_MEAN_REVERSION")
+
+        bars = backtest_engine._synthetic_bars(
+            1500, end_time=pd.Timestamp("2026-10-02T01:00:00Z")
+        )
+        captured = []
+        def fake_generate(bias, profile, vwap, price, atr, **kwargs):
+            captured.append(kwargs.copy())
+            return SimpleNamespace(pois=(), regime=SimpleNamespace(value="BALANCE"))
+        with patch.object(backtest_engine, "generate_regime_pois", side_effect=fake_generate):
+            report = backtest_engine.run_backtest(
+                bars, symbol="EURUSD", macro_bias=1, profile_bins=30,
+            )
+        self.assertEqual(report.instrument_profile, "FX_MEAN_REVERSION")
+        self.assertTrue(captured)
+        self.assertTrue(captured[0]["allow_mean_reversion"])
+        self.assertFalse(captured[0]["allow_trend_pullback"])
+        self.assertEqual(captured[0]["poi_atr_multiplier"], 0.55)
+        self.assertEqual(captured[0]["mean_reversion_confluence_atr"], 1.0)
 
     def test_trigger_uses_profile_stop_buffer_and_spread_ratio(self):
         x = np.arange(30, dtype=float)

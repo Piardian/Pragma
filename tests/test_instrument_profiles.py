@@ -50,7 +50,8 @@ class InstrumentProfileTests(unittest.TestCase):
     def test_symbol_canonicalization(self):
         self.assertEqual(canonical_symbol("XAUUSD.a"), "XAUUSD")
         self.assertEqual(canonical_symbol("GC=F"), "XAUUSD")
-        self.assertEqual(canonical_symbol("BTCUSDT"), "BTCUSD")\n        self.assertEqual(get_instrument_profile("BTCUSDT").name, "CRYPTO_MOMENTUM")
+        self.assertEqual(canonical_symbol("BTCUSDT"), "BTCUSD")
+        self.assertEqual(get_instrument_profile("BTCUSDT").name, "CRYPTO_MOMENTUM")
         self.assertEqual(get_instrument_profile("EURCHFm"), FX_MEAN_REVERSION)
 
     def test_profile_parameters_control_poi_radius_and_trend_permission(self):

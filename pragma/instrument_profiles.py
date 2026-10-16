@@ -17,6 +17,7 @@ class InstrumentProfile:
     min_rr_tp1: float = 1.5
     min_rr_tp2: float = 2.0
     default_trigger_tf: str = "M5"
+    active_hours_utc: tuple[int, int] = (6, 20)
 
 
 MOMENTUM_TREND = InstrumentProfile(
@@ -45,7 +46,7 @@ FX_MEAN_REVERSION = InstrumentProfile(
     default_trigger_tf="M5",
 )
 
-TRIGGER_TIMEFRAME_MINUTES = {
+CRYPTO_MOMENTUM = InstrumentProfile(\n    name="CRYPTO_MOMENTUM",\n    allow_trend_pullback=True,\n    allow_mean_reversion=False,\n    poi_atr_multiplier=0.35,\n    sl_atr_buffer=0.50,\n    imbalance_vwap_poc_atr=0.15,\n    mean_reversion_confluence_atr=0.75,\n    min_spread_to_sl_ratio=4.0,\n    default_trigger_tf="M15",\n    active_hours_utc=(0, 24),\n)\n\n_CRYPTO_SYMBOLS = frozenset({\n    "BTCUSD", "ETHUSD", "SOLUSD", "BNBUSD", "XRPUSD", "DOGEUSD",\n    "ADAUSD", "AVAXUSD", "LINKUSD", "SUIUSD",\n})\n\nTRIGGER_TIMEFRAME_MINUTES = {
     "M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 60, "M60": 60,
 }
 
@@ -92,7 +93,7 @@ def canonical_symbol(symbol: str) -> str:
         value = value[:-1]
     if value.endswith(("USDT", "USDC")) and value[:-4] in {"BTC", "ETH", "SOL"}:
         value = value[:-4] + "USD"
-    aliases = {"GOLD": "XAUUSD", "SILVER": "XAGUSD", "GC=F": "XAUUSD", "BTC": "BTCUSD", "ETH": "ETHUSD", "SOL": "SOLUSD"}
+    aliases = {"GOLD": "XAUUSD", "SILVER": "XAGUSD", "GC=F": "XAUUSD", "BTC": "BTCUSD", "ETH": "ETHUSD", "SOL": "SOLUSD", "BNB": "BNBUSD", "XRP": "XRPUSD", "DOGE": "DOGEUSD", "ADA": "ADAUSD", "AVAX": "AVAXUSD", "LINK": "LINKUSD", "SUI": "SUIUSD"}
     return aliases.get(value, value)
 
 

@@ -667,7 +667,7 @@ def main(argv: list[str] | None = None) -> int:
         results = []
         for crypto_symbol in symbols:
             try:
-                client = BinanceDataClient(no_cache=args.no_cache)
+                client = BinanceDataClient(no_cache=args.no_cache, futures_only=True)
                 m1 = client.rates(crypto_symbol, "M1", max(100000, args.bars))
                 if len(m1) < 100000:
                     raise ValueError(f"Insufficient M1 history: {len(m1)} bars; at least 100000 required")

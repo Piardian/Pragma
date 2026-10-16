@@ -16,6 +16,7 @@ class InstrumentProfile:
     min_spread_to_sl_ratio: float
     min_rr_tp1: float = 1.5
     min_rr_tp2: float = 2.0
+    default_trigger_tf: str = "M5"
 
 
 MOMENTUM_TREND = InstrumentProfile(
@@ -27,6 +28,7 @@ MOMENTUM_TREND = InstrumentProfile(
     imbalance_vwap_poc_atr=0.15,
     mean_reversion_confluence_atr=0.75,
     min_spread_to_sl_ratio=4.0,
+    default_trigger_tf="M5",
 )
 
 FX_MEAN_REVERSION = InstrumentProfile(
@@ -40,7 +42,26 @@ FX_MEAN_REVERSION = InstrumentProfile(
     min_spread_to_sl_ratio=3.0,
     min_rr_tp1=1.0,
     min_rr_tp2=1.35,
+    default_trigger_tf="M5",
 )
+
+TRIGGER_TIMEFRAME_MINUTES = {
+    "M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 60, "M60": 60,
+}
+
+
+def normalize_trigger_tf(timeframe: str) -> str:
+    """Validate a trigger timeframe and normalize M60 to its H1 alias."""
+    value = str(timeframe or "").strip().upper()
+    if value not in TRIGGER_TIMEFRAME_MINUTES:
+        raise ValueError("trigger_tf must be one of M1, M5, M15, M30, H1, M60")
+    return "H1" if value == "M60" else value
+
+
+def trigger_tf_minutes(timeframe: str) -> int:
+    """Return trigger timeframe duration in minutes."""
+    return TRIGGER_TIMEFRAME_MINUTES[normalize_trigger_tf(timeframe)]
+
 
 _MOMENTUM_SYMBOLS = frozenset({
     "XAUUSD", "XAGUSD", "BTCUSD", "ETHUSD", "SOLUSD",
@@ -71,7 +92,7 @@ def canonical_symbol(symbol: str) -> str:
         value = value[:-1]
     if value.endswith(("USDT", "USDC")) and value[:-4] in {"BTC", "ETH", "SOL"}:
         value = value[:-4] + "USD"
-    aliases = {"GOLD": "XAUUSD", "SILVER": "XAGUSD", "GC=F": "XAUUSD"}
+    aliases = {"GOLD": "XAUUSD", "SILVER": "XAGUSD", "GC=F": "XAUUSD", "BTC": "BTCUSD", "ETH": "ETHUSD", "SOL": "SOLUSD"}
     return aliases.get(value, value)
 
 
@@ -96,3 +117,11 @@ def get_instrument_profile(symbol: str) -> InstrumentProfile:
     if _is_fx_cross(canonical):
         return FX_MEAN_REVERSION
     return MOMENTUM_TREND
+
+
+
+def default_trigger_tf_for_symbol(symbol: str) -> str:
+    """Choose a symbol-aware default while preserving the shared momentum profile."""
+    if canonical_symbol(symbol) in {"BTCUSD", "ETHUSD", "SOLUSD"}:
+        return "M15"
+    return get_instrument_profile(symbol).default_trigger_tf

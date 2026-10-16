@@ -106,7 +106,7 @@ class WalkForwardTests(unittest.TestCase):
                 ))
                 return SimpleNamespace(pois=(), regime=SimpleNamespace(value="BALANCE"))
             with patch.object(be, "generate_regime_pois", side_effect=fake_generate):
-                be.run_backtest(frame, symbol="XAUUSD", macro_bias=1, profile_bins=30)
+                be.run_backtest(frame, symbol="XAUUSD", macro_bias=1, profile_bins=30, trigger_tf="M1")
             return observed
 
         original_inputs = capture(base)

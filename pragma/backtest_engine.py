@@ -20,7 +20,7 @@ import pandas as pd
 from pragma.amt_engine import calculate_volume_profile
 from pragma.data.mt5_data import MT5DataClient, filter_closed_bars
 from pragma.macro_gate import MacroGate
-from pragma.instrument_profiles import get_instrument_profile
+from pragma.instrument_profiles import default_trigger_tf_for_symbol, get_instrument_profile, normalize_trigger_tf, trigger_tf_minutes
 from pragma.regime_poi_engine import generate_regime_pois
 from pragma.trigger_engine import evaluate_trigger
 from pragma.vwap_engine import VWAPEngine
@@ -63,6 +63,7 @@ class BacktestReport:
     funnel_counts: dict[str, int]
     instrument_profile: str = "MOMENTUM_TREND"
     risk_per_trade_pct: float = 1.0
+    trigger_tf: str = "M1"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -210,9 +211,8 @@ def _utc_index(frame: pd.DataFrame, name: str) -> pd.DataFrame:
 
 def _resample_tf(m1: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     """Resample M1 bars into left-labelled OHLCV buckets."""
-    if timeframe not in {"M1", "M5", "M15"}:
-        raise ValueError("trigger_tf must be one of M1, M5, M15")
-    minutes = int(timeframe[1:])
+    timeframe = normalize_trigger_tf(timeframe)
+    minutes = trigger_tf_minutes(timeframe)
     columns = ["open", "high", "low", "close", "tick_volume"]
     if minutes == 1:
         return m1[columns].copy()
@@ -282,7 +282,8 @@ def _daily_group_stats(trades: list[BacktestTrade], field: str) -> dict[str, dic
 def _make_report(symbol: str, bars_processed: int, trades: list[BacktestTrade],
                  spread_points: float, point_size: float,
                  funnel_counts: dict[str, int] | None = None,
-                 instrument_profile: str = "MOMENTUM_TREND") -> BacktestReport:
+                 instrument_profile: str = "MOMENTUM_TREND",
+                 trigger_tf: str = "M1") -> BacktestReport:
     values = [trade.r_multiple for trade in trades]
     trade_outcomes = {
         "full_sl_hits": sum(t.exit_reason == "STOP_LOSS" and not t.tp1_taken for t in trades),
@@ -332,6 +333,7 @@ def _make_report(symbol: str, bars_processed: int, trades: list[BacktestTrade],
         point_size=float(point_size),
         funnel_counts=dict(funnel_counts or {}),
         instrument_profile=instrument_profile,
+        trigger_tf=trigger_tf,
     )
 
 
@@ -347,7 +349,7 @@ def run_backtest(
     allow_range: bool = False,
     allow_mean_reversion: bool | None = None,
     disable_trend_pullback: bool = False,
-    trigger_tf: str = "M1",
+    trigger_tf: str | None = None,
     tp1_close_pct: float = 0.50,
     be_offset_r: float | None = 0.0,
 ) -> BacktestReport:
@@ -357,6 +359,7 @@ def run_backtest(
     cost applied at entry and each exit. Only one position can be open at once.
     """
     instrument_profile = get_instrument_profile(symbol)
+    trigger_tf = normalize_trigger_tf(trigger_tf or default_trigger_tf_for_symbol(symbol))
     effective_allow_mean_reversion = (
         instrument_profile.allow_mean_reversion
         if allow_mean_reversion is None else bool(allow_mean_reversion)
@@ -366,8 +369,6 @@ def run_backtest(
     )
     if macro_bias not in (-1, 0, 1):
         raise ValueError("macro_bias must be -1, 0, or +1")
-    if trigger_tf not in {"M1", "M5", "M15"}:
-        raise ValueError("trigger_tf must be one of M1, M5, M15")
     if not np.isfinite(tp1_close_pct) or not 0.0 <= tp1_close_pct <= 1.0:
         raise ValueError("tp1_close_pct must be between 0 and 1")
     if be_offset_r is not None and not np.isfinite(be_offset_r):
@@ -442,7 +443,7 @@ def run_backtest(
                 trades.append(closed_trade)
                 position = None
 
-        trigger_minutes = int(trigger_tf[1:])
+        trigger_minutes = trigger_tf_minutes(trigger_tf)
         if trigger_minutes > 1 and decision_time.minute % trigger_minutes != 0:
             continue
         trigger_cutoff = decision_time - pd.Timedelta(minutes=trigger_minutes)
@@ -556,6 +557,7 @@ def run_backtest(
     return _make_report(
         symbol, processed, trades, spread_points, point_size, funnel_counts,
         instrument_profile=instrument_profile.name,
+        trigger_tf=trigger_tf,
     )
 
 
@@ -594,7 +596,7 @@ def _default_point_size(symbol: str) -> float:
 
 def _print_report(report: BacktestReport) -> None:
     print("\n=== PRAGMA WALK-FORWARD BACKTEST ===")
-    print(f"Symbol: {report.symbol} | Profile: {report.instrument_profile} | Bars: {report.bars_processed} | Trades: {report.total_trades}")
+    print(f"Symbol: {report.symbol} | Profile: {report.instrument_profile} | Trigger TF: {report.trigger_tf} | Bars: {report.bars_processed} | Trades: {report.total_trades}")
     print(f"Win rate: {report.win_rate:.2%} | Profit factor: {report.profit_factor:.3f}")
     print(f"Net R: {report.net_r:.3f} | Expectancy: {report.expectancy_r:.4f} R/trade")
     print(f"Max drawdown: {report.max_drawdown_r:.3f} R")
@@ -624,7 +626,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Adverse spread/slippage cost in instrument points")
     parser.add_argument("--point-size", type=float, default=None,
                         help="Price units per point; inferred by symbol when omitted")
-    parser.add_argument("--trigger-tf", choices=("M1", "M5", "M15"), default="M1")
+    parser.add_argument("--trigger-tf", choices=("M1", "M5", "M15", "M30", "H1", "M60"), default=None,
+                        help="Trigger timeframe; defaults to the instrument profile")
     parser.add_argument("--tp1-close-pct", type=float, default=0.50,
                         help="Fraction closed at TP1; 0 disables partial exit")
     be_group = parser.add_mutually_exclusive_group()

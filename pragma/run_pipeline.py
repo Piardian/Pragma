@@ -80,14 +80,19 @@ def _closed_tf_from_m1(m1: pd.DataFrame, timeframe: str, now: datetime | pd.Time
     timeframe = normalize_trigger_tf(timeframe)
     minutes = trigger_tf_minutes(timeframe)
     columns = ["open", "high", "low", "close", "tick_volume"]
+    has_delta = "volume_delta" in m1.columns
+    selected = columns + (["volume_delta"] if has_delta else [])
     if minutes == 1:
-        return filter_closed_bars(m1[columns], "M1", now=now)
-    frame = m1[columns].resample(
+        frame = m1[selected].copy()
+        frame.attrs.update(m1.attrs)
+        return filter_closed_bars(frame, "M1", now=now)
+    aggregations = {"open": "first", "high": "max", "low": "min", "close": "last", "tick_volume": "sum"}
+    if has_delta:
+        aggregations["volume_delta"] = "sum"
+    frame = m1[selected].resample(
         f"{minutes}min", label="left", closed="left", origin="start_day"
-    ).agg({
-        "open": "first", "high": "max", "low": "min",
-        "close": "last", "tick_volume": "sum",
-    }).dropna()
+    ).agg(aggregations).dropna()
+    frame.attrs.update(m1.attrs)
     return filter_closed_bars(frame, timeframe, now=now)
 
 

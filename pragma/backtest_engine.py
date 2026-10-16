@@ -20,7 +20,7 @@ import pandas as pd
 from pragma.amt_engine import calculate_volume_profile
 from pragma.data.mt5_data import MT5DataClient, filter_closed_bars
 from pragma.macro_gate import MacroGate
-from pragma.instrument_profiles import get_instrument_profile, normalize_trigger_tf, trigger_tf_minutes
+from pragma.instrument_profiles import default_trigger_tf_for_symbol, get_instrument_profile, normalize_trigger_tf, trigger_tf_minutes
 from pragma.regime_poi_engine import generate_regime_pois
 from pragma.trigger_engine import evaluate_trigger
 from pragma.vwap_engine import VWAPEngine
@@ -359,7 +359,7 @@ def run_backtest(
     cost applied at entry and each exit. Only one position can be open at once.
     """
     instrument_profile = get_instrument_profile(symbol)
-    trigger_tf = normalize_trigger_tf(trigger_tf or instrument_profile.default_trigger_tf)
+    trigger_tf = normalize_trigger_tf(trigger_tf or default_trigger_tf_for_symbol(symbol))
     effective_allow_mean_reversion = (
         instrument_profile.allow_mean_reversion
         if allow_mean_reversion is None else bool(allow_mean_reversion)

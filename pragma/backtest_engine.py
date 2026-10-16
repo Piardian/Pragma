@@ -18,7 +18,8 @@ import numpy as np
 import pandas as pd
 
 from pragma.amt_engine import calculate_volume_profile
-from pragma.data.mt5_data import MT5DataClient, filter_closed_bars\nfrom pragma.data.binance_data import BinanceDataClient, normalize_binance_symbol
+from pragma.data.mt5_data import MT5DataClient, filter_closed_bars
+from pragma.data.binance_data import BinanceDataClient, normalize_binance_symbol
 from pragma.macro_gate import MacroGate
 from pragma.instrument_profiles import default_trigger_tf_for_symbol, get_instrument_profile, normalize_trigger_tf, trigger_tf_minutes
 from pragma.regime_poi_engine import generate_regime_pois
@@ -595,7 +596,8 @@ def _default_point_size(symbol: str) -> float:
 
 
 def _print_report(report: BacktestReport) -> None:
-    print("\n=== PRAGMA WALK-FORWARD BACKTEST ===")
+    print("
+=== PRAGMA WALK-FORWARD BACKTEST ===")
     print(f"Symbol: {report.symbol} | Profile: {report.instrument_profile} | Trigger TF: {report.trigger_tf} | Bars: {report.bars_processed} | Trades: {report.total_trades}")
     print(f"Win rate: {report.win_rate:.2%} | Profit factor: {report.profit_factor:.3f}")
     print(f"Net R: {report.net_r:.3f} | Expectancy: {report.expectancy_r:.4f} R/trade")
@@ -603,11 +605,13 @@ def _print_report(report: BacktestReport) -> None:
     print(f"Max daily DD (1% risk): {report.max_daily_drawdown_pct:.2f}%")
     print(f"Max total DD (1% risk): {report.max_total_drawdown_pct:.2f}%")
     print(f"Costs: {report.spread_points:g} points x {report.point_size:g} price units")
-    print("\nFunnel diagnostics:")
+    print("
+Funnel diagnostics:")
     for name, count in report.funnel_counts.items():
         print(f"  {name}: {count}")
     for title, groups in (("By regime", report.trades_by_regime), ("By POI type", report.trades_by_poi_type)):
-        print(f"\n{title}:")
+        print(f"
+{title}:")
         if not groups:
             print("  No closed trades")
         for name, values in groups.items():
@@ -618,7 +622,11 @@ def _print_report(report: BacktestReport) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Causal Pragma walk-forward backtest")
-    parser.add_argument("--symbol", default="XAUUSD")\n    parser.add_argument("--source", choices=("auto", "mt5", "binance"), default="auto")\n    parser.add_argument("--no-cache", action="store_true", help="Disable Binance CSV cache")\n    parser.add_argument("--scan-crypto", action="store_true", help="Backtest the major Binance USDT crypto basket")\n    parser.add_argument("--btc-leader-filter", action="store_true", help="Apply BTC regime leadership filter in crypto scans")
+    parser.add_argument("--symbol", default="XAUUSD")
+    parser.add_argument("--source", choices=("auto", "mt5", "binance"), default="auto")
+    parser.add_argument("--no-cache", action="store_true", help="Disable Binance CSV cache")
+    parser.add_argument("--scan-crypto", action="store_true", help="Backtest the major Binance USDT crypto basket")
+    parser.add_argument("--btc-leader-filter", action="store_true", help="Apply BTC regime leadership filter in crypto scans")
     parser.add_argument("--bars", type=int, default=20000)
     parser.add_argument("--macro-bias", type=int, choices=(-1, 0, 1), default=None)
     parser.add_argument("--profile-bins", type=int, default=100)
@@ -672,7 +680,8 @@ def main(argv: list[str] | None = None) -> int:
         be_offset_r=None if args.no_breakeven else args.be_offset_r,
     )
     _print_report(report)
-    print("\nJSON:")
+    print("
+JSON:")
     print(json.dumps(report.to_dict(), indent=2, allow_nan=True))
     return 0
 

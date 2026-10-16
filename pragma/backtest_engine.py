@@ -83,6 +83,8 @@ class _OpenTrade:
     initial_risk: float
     r_multiple: float = 0.0
     tp1_taken: bool = False
+    tp1_close_pct: float = 0.50
+    be_offset_r: float | None = 0.0
 
 
 def _trade_record(position: _OpenTrade, timestamp: pd.Timestamp,
@@ -106,12 +108,12 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
     if stop_hit:
         exit_price = _adverse_price(position.stop_loss, direction, False, cost)
         if position.tp1_taken:
-            remaining_r = 0.5 * (
+            remaining_r = (1.0 - position.tp1_close_pct) * (
                 (exit_price - position.entry_price) if direction == "LONG"
                 else (position.entry_price - exit_price)
             ) / position.initial_risk
             position.r_multiple += remaining_r
-            reason = "BREAKEVEN_STOP" if abs(position.stop_loss - position.entry_price) < 1e-12 else "STOP_LOSS"
+            reason = "BREAKEVEN_STOP" if position.be_offset_r == 0.0 and abs(position.stop_loss - position.entry_price) < 1e-12 else "STOP_LOSS"
         else:
             position.r_multiple = (
                 (exit_price - position.entry_price) if direction == "LONG"
@@ -131,26 +133,37 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
         ) / position.initial_risk
         return _trade_record(position, timestamp, "TAKE_PROFIT_2_SINGLE_TARGET")
     if not position.tp1_taken and tp1_hit:
+        if position.tp1_close_pct <= 0.0:
+            if tp2_hit:
+                target_exit = _adverse_price(position.tp2, direction, False, cost)
+                position.r_multiple = (
+                    (target_exit - position.entry_price) if direction == "LONG"
+                    else (position.entry_price - target_exit)
+                ) / position.initial_risk
+                return _trade_record(position, timestamp, "TAKE_PROFIT_2")
+            return None
         tp1_exit = _adverse_price(position.tp1, direction, False, cost)
-        position.r_multiple += 0.5 * (
+        position.r_multiple += position.tp1_close_pct * (
             (tp1_exit - position.entry_price) if direction == "LONG"
             else (position.entry_price - tp1_exit)
         ) / position.initial_risk
         position.tp1_taken = True
-        position.stop_loss = position.entry_price
+        if position.be_offset_r is not None:
+            offset = position.be_offset_r * position.initial_risk
+            position.stop_loss = position.entry_price + offset if direction == "LONG" else position.entry_price - offset
         # OHLC cannot reveal target ordering. If TP2 is also touched, treat the
         # remaining half as breakeven when that level was crossed in the candle.
         breakeven_hit = low <= position.entry_price if direction == "LONG" else high >= position.entry_price
         if tp2_hit and not breakeven_hit:
             tp2_exit = _adverse_price(position.tp2, direction, False, cost)
-            position.r_multiple += 0.5 * (
+            position.r_multiple += (1.0 - position.tp1_close_pct) * (
                 (tp2_exit - position.entry_price) if direction == "LONG"
                 else (position.entry_price - tp2_exit)
             ) / position.initial_risk
             return _trade_record(position, timestamp, "TP1_TP2_SAME_BAR")
         if breakeven_hit:
             be_exit = _adverse_price(position.entry_price, direction, False, cost)
-            position.r_multiple += 0.5 * (
+            position.r_multiple += (1.0 - position.tp1_close_pct) * (
                 (be_exit - position.entry_price) if direction == "LONG"
                 else (position.entry_price - be_exit)
             ) / position.initial_risk
@@ -159,7 +172,7 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
 
     if position.tp1_taken and tp2_hit:
         tp2_exit = _adverse_price(position.tp2, direction, False, cost)
-        position.r_multiple += 0.5 * (
+        position.r_multiple += (1.0 - position.tp1_close_pct) * (
             (tp2_exit - position.entry_price) if direction == "LONG"
             else (position.entry_price - tp2_exit)
         ) / position.initial_risk
@@ -514,7 +527,8 @@ def run_backtest(
                 symbol=symbol, direction=poi.direction, poi_type=poi.poi_type,
                 regime=regime_decision.regime.value, entry_time=timestamp,
                 entry_price=entry, initial_stop_loss=stop, stop_loss=stop,
-                tp1=float(tp1), tp2=float(tp2), initial_risk=risk,
+                tp1=float(tp1 if tp1_close_pct > 0.0 else tp2), tp2=float(tp2),
+                initial_risk=risk, tp1_close_pct=tp1_close_pct, be_offset_r=be_offset_r,
             )
             funnel_counts["trades_opened"] += 1
             break
@@ -524,7 +538,7 @@ def run_backtest(
     if position is not None:
         final_time = m1.index[-1]
         final_close = _adverse_price(float(m1.iloc[-1]["close"]), position.direction, False, cost)
-        remaining_fraction = 0.5 if position.tp1_taken else 1.0
+        remaining_fraction = (1.0 - position.tp1_close_pct) if position.tp1_taken else 1.0
         position.r_multiple += remaining_fraction * (
             (final_close - position.entry_price) if position.direction == "LONG"
             else (position.entry_price - final_close)

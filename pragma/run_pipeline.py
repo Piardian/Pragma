@@ -75,15 +75,24 @@ def _atr_from_m15(bars: pd.DataFrame, period: int = 14) -> float:
     return float(atr)
 
 
-def _closed_m15_from_m1(m1: pd.DataFrame, now: datetime | pd.Timestamp) -> pd.DataFrame:
-    # Resample only already-closed M1 candles. Each M15 bucket is left-labelled.
-    m15 = m1[["open", "high", "low", "close", "tick_volume"]].resample(
-        "15min", label="left", closed="left"
+def _closed_tf_from_m1(m1: pd.DataFrame, timeframe: str, now: datetime | pd.Timestamp) -> pd.DataFrame:
+    if timeframe not in {"M1", "M5", "M15"}:
+        raise ValueError("trigger_tf must be one of M1, M5, M15")
+    minutes = int(timeframe[1:])
+    columns = ["open", "high", "low", "close", "tick_volume"]
+    if minutes == 1:
+        return filter_closed_bars(m1[columns], "M1", now=now)
+    frame = m1[columns].resample(
+        f"{minutes}min", label="left", closed="left", origin="start_day"
     ).agg({
         "open": "first", "high": "max", "low": "min",
         "close": "last", "tick_volume": "sum",
     }).dropna()
-    return filter_closed_bars(m15, "M15", now=now)
+    return filter_closed_bars(frame, timeframe, now=now)
+
+
+def _closed_m15_from_m1(m1: pd.DataFrame, now: datetime | pd.Timestamp) -> pd.DataFrame:
+    return _closed_tf_from_m1(m1, "M15", now)
 
 
 def run_pipeline(
@@ -99,6 +108,7 @@ def run_pipeline(
     allow_mean_reversion: bool | None = None,
     disable_trend_pullback: bool = False,
     cost_price: float = 0.0,
+    trigger_tf: str = "M1",
 ) -> dict[str, Any]:
     """Run all analytical layers and return a JSON-serializable report."""
     clock = pd.Timestamp(now if now is not None else datetime.now(timezone.utc))
@@ -107,6 +117,8 @@ def run_pipeline(
     else:
         clock = clock.tz_convert("UTC")
 
+    if trigger_tf not in {"M1", "M5", "M15"}:
+        raise ValueError("trigger_tf must be one of M1, M5, M15")
     instrument_profile = get_instrument_profile(symbol)
     effective_allow_mean_reversion = (
         instrument_profile.allow_mean_reversion
@@ -155,6 +167,13 @@ def run_pipeline(
 
     last_bar_time = m1.index[-1]
     last_bar = m1.iloc[-1]
+    trigger_minutes = int(trigger_tf[1:])
+    trigger_bars = _closed_tf_from_m1(m1, trigger_tf, clock)
+    trigger_is_newly_closed = (
+        trigger_minutes == 1 or
+        (last_bar_time + pd.Timedelta(minutes=1)).minute % trigger_minutes == 0
+    )
+    trigger_window = trigger_bars.iloc[-20:] if trigger_is_newly_closed else trigger_bars.iloc[0:0]
     current_price = float(last_bar["close"])
     profiles = calculate_session_profiles(
         m1, session_key=session_key, as_of=last_bar_time, bins=profile_bins
@@ -185,9 +204,11 @@ def run_pipeline(
     trigger_reports: list[dict[str, Any]] = []
     notifications: list[dict[str, Any]] = []
     for poi in regime_decision.pois:
+        trigger_bar = trigger_window.iloc[-1] if not trigger_window.empty else None
         intersects = (
-            float(last_bar["low"]) <= poi.poi_high
-            and float(last_bar["high"]) >= poi.poi_low
+            trigger_bar is not None
+            and float(trigger_bar["low"]) <= poi.poi_high
+            and float(trigger_bar["high"]) >= poi.poi_low
         )
         poi_reports.append({
             "direction": poi.direction,
@@ -205,7 +226,7 @@ def run_pipeline(
         if not intersects:
             continue
         decision = evaluate_trigger(
-            m1, poi.direction, poi.poi_low, poi.poi_high, atr_14,
+            trigger_window, poi.direction, poi.poi_low, poi.poi_high, atr_14,
             poi.take_profits, poi_type=poi.poi_type,
             center_price=poi.center, cost_price=cost_price,
             sl_atr_buffer=instrument_profile.sl_atr_buffer,
@@ -315,6 +336,7 @@ def _watch(args: argparse.Namespace) -> int:
                         allow_mean_reversion=True if args.allow_mean_reversion else None,
                         disable_trend_pullback=args.disable_trend_pullback,
                         cost_price=args.spread_points * (args.point_size if args.point_size is not None else _default_point_size(args.symbol)),
+                        trigger_tf=args.trigger_tf,
                     )
                     bar_time = result["bars"]["last_closed_m1_time"]
                     # The pipeline may finish on a bar newer than the cheap poll.
@@ -358,6 +380,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Spread/slippage cost in instrument points")
     parser.add_argument("--point-size", type=float, default=None,
                         help="Price units per point; inferred by symbol when omitted")
+    parser.add_argument("--trigger-tf", choices=("M1", "M5", "M15"), default="M1",
+                        help="Closed-candle timeframe used for POI trigger confirmation")
     parser.add_argument("--refresh-macro", action="store_true",
                         help="Refresh Begonya macro gate first if missing or stale")
     args = parser.parse_args(argv)
@@ -373,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
         macro_bias=args.macro_bias, dry_run=args.dry_run,
         allow_mean_reversion=True if args.allow_mean_reversion else None,
         disable_trend_pullback=args.disable_trend_pullback, cost_price=cost_price,
+        trigger_tf=args.trigger_tf,
     )
     print(json.dumps(result, indent=2, default=str))
     return 0

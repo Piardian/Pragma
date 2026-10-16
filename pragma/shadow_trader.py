@@ -152,7 +152,8 @@ class PaperTradingBook:
                 continue
             seen.add(signal_key)
             self.state["seen_signals"] = list(seen)[-5000:]
-            metrics = signal.get("metrics", {}) if isinstance(signal.get("metrics", {}), dict) else {}\n            entry = float(signal.get("effective_entry") or metrics.get("effective_entry") or signal.get("entry_price") or normalized["close"])
+            metrics = signal.get("metrics", {}) if isinstance(signal.get("metrics", {}), dict) else {}
+            entry = float(signal.get("effective_entry") or metrics.get("effective_entry") or signal.get("entry_price") or normalized["close"])
             stop = float(signal["stop_loss"])
             tp1 = float(signal["take_profit_1"])
             tp2 = float(signal.get("take_profit_2") or tp1)

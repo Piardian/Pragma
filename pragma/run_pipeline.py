@@ -397,6 +397,7 @@ def _watch(args: argparse.Namespace) -> int:
         raise ValueError("--interval-sec must be >= 1")
     notifier = ExecutionNotifier()
     last_processed: dict[str, str] = {}
+    last_scan_rows: dict[str, dict[str, Any]] = {}
     if args.scan_begonya:
         print(f"PRAGMA WATCH started | mode=Begonya multi-symbol scan | poll={args.interval_sec}s")
     else:
@@ -411,31 +412,68 @@ def _watch(args: argparse.Namespace) -> int:
             try:
                 if args.scan_begonya:
                     active_symbols = _active_begonya_mt5_symbols()
+                    active_names = {symbol for symbol, _ in active_symbols}
+                    for stale_symbol in set(last_scan_rows) - active_names:
+                        last_scan_rows.pop(stale_symbol, None)
                     if not active_symbols:
                         print("BEGONYA SCAN | no active non-neutral gate symbols found in MT5", flush=True)
                     for symbol, bias in active_symbols:
                         latest_time = _latest_closed_m1_time(symbol)
-                        if latest_time is None or latest_time.isoformat() == last_processed.get(symbol):
+                        if latest_time is None:
+                            last_scan_rows[symbol] = {
+                                "symbol": symbol, "bias": bias,
+                                "profile": get_instrument_profile(symbol).name,
+                                "trigger_tf": normalize_trigger_tf(
+                                    args.trigger_tf or get_instrument_profile(symbol).default_trigger_tf
+                                ),
+                                "regime": "-", "pois": 0, "status": "NO_CLOSED_BAR",
+                            }
                             continue
-                        result = run_pipeline(
-                            symbol=symbol, bars_count=args.bars,
-                            profile_bins=args.profile_bins, macro_bias=None,
-                            dry_run=False, notifier=notifier, notify_pois=False,
-                            allow_mean_reversion=True if args.allow_mean_reversion else None,
-                            disable_trend_pullback=args.disable_trend_pullback,
-                            cost_price=args.spread_points * (
-                                args.point_size if args.point_size is not None else _default_point_size(symbol)
-                            ),
-                            trigger_tf=args.trigger_tf,
-                        )
-                        stamp = result["bars"]["last_closed_m1_time"]
-                        last_processed[symbol] = stamp
-                        executed = any(item.get("execute") is True for item in result.get("triggers", []))
+                        if latest_time.isoformat() != last_processed.get(symbol):
+                            try:
+                                result = run_pipeline(
+                                    symbol=symbol, bars_count=args.bars,
+                                    profile_bins=args.profile_bins, macro_bias=None,
+                                    dry_run=False, notifier=notifier, notify_pois=False,
+                                    allow_mean_reversion=True if args.allow_mean_reversion else None,
+                                    disable_trend_pullback=args.disable_trend_pullback,
+                                    cost_price=args.spread_points * (
+                                        args.point_size if args.point_size is not None else _default_point_size(symbol)
+                                    ),
+                                    trigger_tf=args.trigger_tf,
+                                )
+                                stamp = result["bars"]["last_closed_m1_time"]
+                                last_processed[symbol] = stamp
+                                executed = any(item.get("execute") is True for item in result.get("triggers", []))
+                                last_scan_rows[symbol] = {
+                                    "symbol": symbol, "bias": bias,
+                                    "profile": result["instrument_profile"],
+                                    "trigger_tf": result["trigger_tf"],
+                                    "regime": result["regime"],
+                                    "pois": len(result.get("pois", [])),
+                                    "status": "EXECUTE" if executed else "WAIT",
+                                }
+                            except Exception as exc:
+                                last_scan_rows[symbol] = {
+                                    "symbol": symbol, "bias": bias,
+                                    "profile": get_instrument_profile(symbol).name,
+                                    "trigger_tf": normalize_trigger_tf(
+                                        args.trigger_tf or get_instrument_profile(symbol).default_trigger_tf
+                                    ),
+                                    "regime": "-", "pois": 0, "status": f"ERROR: {exc}",
+                                }
+                        elif symbol in last_scan_rows:
+                            last_scan_rows[symbol]["bias"] = bias
+                    print("\\nBEGONYA WATCH SCAN")
+                    print(f"{'SYMBOL':<14} {'BIAS':<6} {'PROFILE':<20} {'TF':<5} {'REGIME':<18} {'POI':>4}  STATUS")
+                    for symbol, _bias in active_symbols:
+                        row = last_scan_rows.get(symbol)
+                        if not row:
+                            continue
+                        bias_label = "LONG" if row["bias"] > 0 else "SHORT"
                         print(
-                            f"[{stamp}] {symbol} bias={'LONG' if bias > 0 else 'SHORT'} "
-                            f"| {result['instrument_profile']} | TF={result['trigger_tf']} "
-                            f"| {result['regime']} | POI={len(result.get('pois', []))} "
-                            f"| {'EXECUTE' if executed else 'WAIT'}",
+                            f"{symbol:<14} {bias_label:<6} {row['profile']:<20} "
+                            f"{row['trigger_tf']:<5} {row['regime']:<18} {row['pois']:>4}  {row['status']}",
                             flush=True,
                         )
                 else:

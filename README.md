@@ -94,7 +94,7 @@ include the instruments to be scanned. Pragma does not place broker orders.
 
 ## Broker-free shadow trading (Windows)
 
-The optional shadow trader simulates virtual positions from Pragma execution signals. MT5 is used **only as a read-only price feed**; this module never sends broker orders. Default virtual balance is 10,000 account units with 1% initial balance risk per trade. These are simulation assumptions, not broker contract sizing.
+The optional shadow trader simulates virtual positions from Pragma execution signals. MT5 is used **only as a read-only price feed**; this module never sends broker orders. Default virtual balance is 10,000 account units with risk sized at 1% of current virtual balance per trade. These are simulation assumptions, not broker contract sizing.
 
 Run it manually:
 ```powershell

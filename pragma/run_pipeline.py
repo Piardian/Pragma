@@ -105,7 +105,7 @@ def run_pipeline(
     symbol: str = "XAUUSD",
     bars_count: int = 3000,
     profile_bins: int = 100,
-    macro_bias: int | None = None,
+    macro_bias: int | str | None = None,
     dry_run: bool = False,
     notifier: Any | None = None,
     now: datetime | pd.Timestamp | None = None,
@@ -116,6 +116,7 @@ def run_pipeline(
     trigger_tf: str | None = None,
     source: str = "auto",
     no_cache: bool = False,
+    btc_leader_regime: str | None = None,
 ) -> dict[str, Any]:
     """Run all analytical layers and return a JSON-serializable report."""
     clock = pd.Timestamp(now if now is not None else datetime.now(timezone.utc))
@@ -134,26 +135,37 @@ def run_pipeline(
         instrument_profile.allow_trend_pullback and not disable_trend_pullback
     )
 
-    macro_decision = None
-    allow_range = False
-    if macro_bias is None:
-        macro_decision = MacroGate().get_bias(symbol)
-        bias = int(macro_decision.bias)
-        allow_range = getattr(macro_decision, "gate", None) == "NEUTRAL_RANGE"
-        macro_source = macro_decision.source
-        macro_reason = macro_decision.reason
-    else:
-        if macro_bias not in (-1, 0, 1):
-            raise ValueError("--macro-bias must be -1, 0, or 1")
-        bias = int(macro_bias)
-        macro_source = "cli"
-        macro_reason = "Explicit command-line override"
-
     selected_source = ("binance" if str(symbol).upper().endswith("USDT") else "mt5") if source == "auto" else source
     if selected_source not in ("mt5", "binance"):
         raise ValueError("source must be auto, mt5, or binance")
     if selected_source == "binance":
         symbol = normalize_binance_symbol(symbol)
+
+    macro_decision = None
+    allow_range = False
+    auto_requested = isinstance(macro_bias, str) and macro_bias.strip().lower() == "auto"
+    if auto_requested:
+        bias = "auto"
+        macro_source = "internal_crypto_regime"
+        macro_reason = "Causal price/VWAP regime: strict prior-session value-area and ATR-buffered POC conditions"
+    elif macro_bias is None:
+        macro_decision = MacroGate().get_bias(symbol)
+        gate_bias = int(macro_decision.bias)
+        allow_range = getattr(macro_decision, "gate", None) == "NEUTRAL_RANGE"
+        if selected_source == "binance" and (gate_bias == 0 or allow_range):
+            bias = "auto"
+            macro_source = "internal_crypto_regime_fallback"
+            macro_reason = "Begonya gate missing/neutral for crypto; using causal internal regime"
+        else:
+            bias = gate_bias
+            macro_source = macro_decision.source
+            macro_reason = macro_decision.reason
+    else:
+        if macro_bias not in (-1, 0, 1):
+            raise ValueError("--macro-bias must be auto, -1, 0, or 1")
+        bias = int(macro_bias)
+        macro_source = "cli"
+        macro_reason = "Explicit command-line override"
     if dry_run:
         raw_m1 = _synthetic_bars(clock)
         m1 = filter_closed_bars(raw_m1, "M1", now=clock)
@@ -229,7 +241,13 @@ def run_pipeline(
     poi_reports: list[dict[str, Any]] = []
     trigger_reports: list[dict[str, Any]] = []
     notifications: list[dict[str, Any]] = []
-    for poi in regime_decision.pois:
+    effective_pois = regime_decision.pois
+    if btc_leader_regime and symbol != "BTCUSDT":
+        effective_pois = tuple(
+            poi for poi in effective_pois
+            if btc_leader_allows_direction(btc_leader_regime, symbol, poi.direction)
+        )
+    for poi in effective_pois:
         trigger_bar = trigger_window.iloc[-1] if not trigger_window.empty else None
         intersects = (
             trigger_bar is not None
@@ -283,7 +301,8 @@ def run_pipeline(
         "trigger_tf": trigger_tf,
         "dry_run": dry_run,
         "macro": {
-            "bias": bias,
+            "bias": regime_decision.macro_bias,
+            "mode": "auto" if auto_requested or (isinstance(bias, str) and bias == "auto") else "fixed",
             "source": macro_source,
             "reason": macro_reason,
             "gate": getattr(macro_decision, "gate", None) if macro_bias is None else None,
@@ -318,6 +337,8 @@ def run_pipeline(
         },
         "regime": regime_decision.regime.value,
         "regime_reason": regime_decision.reason,
+        "btc_leader_regime": btc_leader_regime,
+        "btc_leader_filter_removed_pois": len(regime_decision.pois) - len(effective_pois),
         "pois": poi_reports,
         "triggers": trigger_reports,
         "notifications": notifications,
@@ -546,7 +567,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--btc-leader-filter", action="store_true", help="Suppress counter-BTC altcoin directions when BTC regime is strongly imbalanced")
     parser.add_argument("--bars", type=int, default=3000)
     parser.add_argument("--profile-bins", type=int, default=100)
-    parser.add_argument("--macro-bias", type=int, choices=(-1, 0, 1), default=None)
+    parser.add_argument("--macro-bias", choices=("-1", "0", "1", "auto"), default=None, help="Macro bias override, or auto for internal crypto regime")
+    parser.add_argument("--auto-direction", action="store_true", help="Infer crypto long/short direction from causal internal regime")
+    parser.add_argument("--silent-notifications", action="store_true", help="Suppress POI and trigger Telegram notifications")
     parser.add_argument("--dry-run", action="store_true",
                         help="Run the complete pipeline using deterministic synthetic M1 data")
     parser.add_argument("--watch", action="store_true",
@@ -578,36 +601,46 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--scan-begonya requires a live MT5 connection; --dry-run is not supported")
         _scan_begonya_once(args, notifier=ExecutionNotifier())
         return 0
+    if args.macro_bias is not None and args.macro_bias != "auto":
+        args.macro_bias = int(args.macro_bias)
+    if args.auto_direction:
+        args.macro_bias = "auto"
     if args.scan_crypto:
-        symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT")
+        symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT")
         reports = []
+        btc_regime = None
         for crypto_symbol in symbols:
             try:
-                report = run_pipeline(symbol=crypto_symbol, bars_count=args.bars, profile_bins=args.profile_bins,
-                    macro_bias=args.macro_bias if args.macro_bias is not None else 1, dry_run=False,
-                    trigger_tf=args.trigger_tf, source="binance", no_cache=args.no_cache)
+                report = run_pipeline(
+                    symbol=crypto_symbol, bars_count=args.bars, profile_bins=args.profile_bins,
+                    macro_bias=args.macro_bias, dry_run=False,
+                    trigger_tf=args.trigger_tf, source="binance", no_cache=args.no_cache,
+                    notify_pois=not args.silent_notifications,
+                    btc_leader_regime=btc_regime if args.btc_leader_filter and crypto_symbol != "BTCUSDT" else None,
+                    allow_mean_reversion=True if args.allow_mean_reversion else None,
+                    disable_trend_pullback=args.disable_trend_pullback,
+                    cost_price=args.spread_points * (args.point_size if args.point_size is not None else _default_point_size(crypto_symbol)),
+                )
                 report["symbol"] = crypto_symbol
                 reports.append(report)
+                if crypto_symbol == "BTCUSDT":
+                    btc_regime = str(report.get("regime", "")).upper()
             except Exception as exc:
                 reports.append({"symbol": crypto_symbol, "error": str(exc)})
-        if args.btc_leader_filter and reports and isinstance(reports[0], dict):
-            btc_regime = str(reports[0].get("regime", "")).upper()
-            for report in reports[1:]:
-                if not isinstance(report, dict):
-                    continue
-                for trigger in report.get("triggers", []):
-                    direction = trigger.get("direction")
-                    if direction and not btc_leader_allows_direction(btc_regime, report.get("symbol", ""), direction):
-                        trigger["execute"] = False
-                        trigger["reason"] = "BTC_LEADER_FILTER"
-                report["btc_leader_regime"] = btc_regime
+                if crypto_symbol == "BTCUSDT":
+                    btc_regime = None
         print(json.dumps(reports, indent=2, default=str))
         return 0
     point_size = args.point_size if args.point_size is not None else _default_point_size(args.symbol)
     cost_price = args.spread_points * point_size
+    if args.macro_bias is not None and args.macro_bias != "auto":
+        args.macro_bias = int(args.macro_bias)
+    if args.auto_direction:
+        args.macro_bias = "auto"
     result = run_pipeline(
         symbol=args.symbol, bars_count=args.bars, profile_bins=args.profile_bins,
         macro_bias=args.macro_bias, dry_run=args.dry_run,
+        notify_pois=not args.silent_notifications,
         allow_mean_reversion=True if args.allow_mean_reversion else None,
         disable_trend_pullback=args.disable_trend_pullback, cost_price=cost_price,
         trigger_tf=args.trigger_tf, source=args.source, no_cache=args.no_cache,

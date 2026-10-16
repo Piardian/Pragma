@@ -90,3 +90,23 @@ Set-ExecutionPolicy -Scope Process Bypass
 The task starts at user logon, not before login. MetaTrader 5 must be installed,
 running, logged in, and connected to the broker; its available symbols must
 include the instruments to be scanned. Pragma does not place broker orders.
+
+
+## Broker-free shadow trading (Windows)
+
+The optional shadow trader simulates virtual positions from Pragma execution signals. MT5 is used **only as a read-only price feed**; this module never sends broker orders. Default virtual balance is 10,000 account units with 1% initial balance risk per trade. These are simulation assumptions, not broker contract sizing.
+
+Run it manually:
+```powershell
+.\run_shadow_trader.bat
+```
+
+Or install a separate Windows Scheduled Task that starts after the current Windows user signs in and restarts the process after failures:
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\install_shadow_startup_task.ps1
+```
+
+Configure `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` as Windows user environment variables to receive entry, partial TP, final TP/SL, balance, error, and periodic heartbeat notifications. The task starts after sign-in, not before a user session; MT5 must also be installed, logged in, and providing fresh prices. For a restart/reboot to recover open virtual positions, state is stored outside the repository under `%LOCALAPPDATA%\Pragma\shadow_trading` (or `PRAGMA_SHADOW_DIR` if configured).
+
+Simulation policy: TP1 takes 50% off when TP1 and TP2 differ, then moves the remaining stop to entry; TP2 closes the remainder. If SL and a target are both touched in the same OHLC bar, SL wins. TP1 and TP2 are not both assumed to occur in the same bar. Results omit broker commissions and live execution slippage unless reflected by the configured spread cost. Do not interpret paper results as proof of future profitability.

@@ -596,8 +596,7 @@ def _default_point_size(symbol: str) -> float:
 
 
 def _print_report(report: BacktestReport) -> None:
-    print("
-=== PRAGMA WALK-FORWARD BACKTEST ===")
+    print("\n=== PRAGMA WALK-FORWARD BACKTEST ===")
     print(f"Symbol: {report.symbol} | Profile: {report.instrument_profile} | Trigger TF: {report.trigger_tf} | Bars: {report.bars_processed} | Trades: {report.total_trades}")
     print(f"Win rate: {report.win_rate:.2%} | Profit factor: {report.profit_factor:.3f}")
     print(f"Net R: {report.net_r:.3f} | Expectancy: {report.expectancy_r:.4f} R/trade")
@@ -605,8 +604,7 @@ def _print_report(report: BacktestReport) -> None:
     print(f"Max daily DD (1% risk): {report.max_daily_drawdown_pct:.2f}%")
     print(f"Max total DD (1% risk): {report.max_total_drawdown_pct:.2f}%")
     print(f"Costs: {report.spread_points:g} points x {report.point_size:g} price units")
-    print("
-Funnel diagnostics:")
+    print("\nFunnel diagnostics:")
     for name, count in report.funnel_counts.items():
         print(f"  {name}: {count}")
     for title, groups in (("By regime", report.trades_by_regime), ("By POI type", report.trades_by_poi_type)):

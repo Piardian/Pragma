@@ -129,7 +129,9 @@ def classify_regime(current_price: float, previous_profile: Any,
 def generate_regime_pois(
     macro_bias: int, previous_profile: Any, vwap: Any,
     current_price: float, atr_14: float, *, allow_range: bool = False,
-    allow_mean_reversion: bool = False,
+    allow_mean_reversion: bool = False, allow_trend_pullback: bool = True,
+    poi_atr_multiplier: float = 0.35, imbalance_vwap_poc_atr: float = 0.15,
+    mean_reversion_confluence_atr: float = 0.75,
 ) -> RegimePOIDecision:
     """Classify regime and generate only spec-defined directional POIs.
 
@@ -173,7 +175,10 @@ def generate_regime_pois(
     if macro_bias == 0 and not allow_range:
         return RegimePOIDecision(regime, macro_bias, price, atr, (), "NEUTRAL_MACRO")
 
-    tolerance, half_width = 0.75 * atr, 0.35 * atr
+    tolerance = float(mean_reversion_confluence_atr) * atr
+    half_width = float(poi_atr_multiplier) * atr
+    if tolerance < 0 or half_width <= 0 or imbalance_vwap_poc_atr < 0:
+        raise ValueError("Instrument profile ATR multipliers must be non-negative (POI width must be positive)")
     balance_window = val - 0.5 * atr <= price <= vah + 0.5 * atr
     pois: list[POIZone] = []
     counter_long_locked = (
@@ -215,11 +220,16 @@ def generate_regime_pois(
             if match:
                 add("LONG", "LONG_MEAN_REVERSION", match[0],
                     (lower_1, vwap_value, poc), match[1])
+            elif (level_name == "pdVAL"
+                  and (macro_bias == 1 or (macro_bias == 0 and allow_range))
+                  and abs(price - val) <= half_width and price <= vwap_value):
+                add("LONG", "LONG_MEAN_REVERSION", val,
+                    (lower_1, vwap_value, poc), ("pdVAL", "direct_level_touch", "vwap_midpoint"))
     # Require VWAP to separate materially from prior-session POC before
     # treating an upside imbalance as a tradable trend regime.
-    bull_imbalance_quality = vwap_value >= poc + (0.15 * atr)
-    bear_imbalance_quality = vwap_value <= poc - (0.15 * atr)
-    if macro_bias == 1 and regime == MarketRegime.IMBALANCE_BULL and bull_imbalance_quality:
+    bull_imbalance_quality = vwap_value >= poc + (float(imbalance_vwap_poc_atr) * atr)
+    bear_imbalance_quality = vwap_value <= poc - (float(imbalance_vwap_poc_atr) * atr)
+    if allow_trend_pullback and macro_bias == 1 and regime == MarketRegime.IMBALANCE_BULL and bull_imbalance_quality:
         for name, level in (("lower_1p0sigma", lower_1), ("vwap", vwap_value)):
             match = _pair_if_confluent("pdVAH", vah, name, level, tolerance)
             if match:
@@ -257,7 +267,12 @@ def generate_regime_pois(
             if match:
                 add("SHORT", "SHORT_MEAN_REVERSION", match[0],
                     (upper_1, vwap_value, poc), match[1])
-    if macro_bias == -1 and regime == MarketRegime.IMBALANCE_BEAR and bear_imbalance_quality:
+            elif (level_name == "pdVAH"
+                  and (macro_bias == -1 or (macro_bias == 0 and allow_range))
+                  and abs(price - vah) <= half_width and price >= vwap_value):
+                add("SHORT", "SHORT_MEAN_REVERSION", vah,
+                    (upper_1, vwap_value, poc), ("pdVAH", "direct_level_touch", "vwap_midpoint"))
+    if allow_trend_pullback and macro_bias == -1 and regime == MarketRegime.IMBALANCE_BEAR and bear_imbalance_quality:
         for name, level in (("upper_1p0sigma", upper_1), ("vwap", vwap_value)):
             match = _pair_if_confluent("pdVAL", val, name, level, tolerance)
             if match:
@@ -306,8 +321,16 @@ class RegimePOIEngine:
     def evaluate(self, macro_bias: int, previous_profile: Any, vwap: Any,
                  current_price: float, atr_14: float, *,
                  allow_range: bool = False,
-                 allow_mean_reversion: bool = False) -> RegimePOIDecision:
+                 allow_mean_reversion: bool = False,
+                 allow_trend_pullback: bool = True,
+                 poi_atr_multiplier: float = 0.35,
+                 imbalance_vwap_poc_atr: float = 0.15,
+                 mean_reversion_confluence_atr: float = 0.75) -> RegimePOIDecision:
         return generate_regime_pois(
             macro_bias, previous_profile, vwap, current_price, atr_14,
             allow_range=allow_range, allow_mean_reversion=allow_mean_reversion,
+            allow_trend_pullback=allow_trend_pullback,
+            poi_atr_multiplier=poi_atr_multiplier,
+            imbalance_vwap_poc_atr=imbalance_vwap_poc_atr,
+            mean_reversion_confluence_atr=mean_reversion_confluence_atr,
         )

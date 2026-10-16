@@ -20,6 +20,7 @@ from pragma.amt_engine import AMTEngine, calculate_session_profiles
 from pragma.data.mt5_data import MT5DataClient, filter_closed_bars
 from pragma.execution_notifier import ExecutionNotifier
 from pragma.macro_gate import MacroGate, refresh_begonya_gate
+from pragma.instrument_profiles import get_instrument_profile
 from pragma.regime_poi_engine import generate_regime_pois
 from pragma.trigger_engine import evaluate_trigger
 from pragma.vwap_engine import VWAPEngine
@@ -95,7 +96,8 @@ def run_pipeline(
     notifier: Any | None = None,
     now: datetime | pd.Timestamp | None = None,
     notify_pois: bool = True,
-    allow_mean_reversion: bool = False,
+    allow_mean_reversion: bool | None = None,
+    disable_trend_pullback: bool = False,
     cost_price: float = 0.0,
 ) -> dict[str, Any]:
     """Run all analytical layers and return a JSON-serializable report."""
@@ -104,6 +106,15 @@ def run_pipeline(
         clock = clock.tz_localize("UTC")
     else:
         clock = clock.tz_convert("UTC")
+
+    instrument_profile = get_instrument_profile(symbol)
+    effective_allow_mean_reversion = (
+        instrument_profile.allow_mean_reversion
+        if allow_mean_reversion is None else bool(allow_mean_reversion)
+    )
+    effective_allow_trend_pullback = (
+        instrument_profile.allow_trend_pullback and not disable_trend_pullback
+    )
 
     macro_decision = None
     allow_range = False
@@ -155,7 +166,12 @@ def run_pipeline(
     atr_14 = _atr_from_m15(m15)
     regime_decision = generate_regime_pois(
         bias, profiles.previous, latest_vwap, current_price, atr_14,
-        allow_range=allow_range, allow_mean_reversion=allow_mean_reversion,
+        allow_range=allow_range,
+        allow_mean_reversion=effective_allow_mean_reversion,
+        allow_trend_pullback=effective_allow_trend_pullback,
+        poi_atr_multiplier=instrument_profile.poi_atr_multiplier,
+        imbalance_vwap_poc_atr=instrument_profile.imbalance_vwap_poc_atr,
+        mean_reversion_confluence_atr=instrument_profile.mean_reversion_confluence_atr,
     )
 
     notifier_instance = notifier
@@ -192,6 +208,8 @@ def run_pipeline(
             m1, poi.direction, poi.poi_low, poi.poi_high, atr_14,
             poi.take_profits, poi_type=poi.poi_type,
             center_price=poi.center, cost_price=cost_price,
+            sl_atr_buffer=instrument_profile.sl_atr_buffer,
+            min_spread_to_sl_ratio=instrument_profile.min_spread_to_sl_ratio,
         )
         trigger_reports.append({
             "execute": decision.execute,
@@ -213,6 +231,7 @@ def run_pipeline(
 
     return {
         "symbol": symbol,
+        "instrument_profile": instrument_profile.name,
         "dry_run": dry_run,
         "macro": {
             "bias": bias,
@@ -282,7 +301,8 @@ def _watch(args: argparse.Namespace) -> int:
         raise ValueError("--interval-sec must be >= 1")
     notifier = ExecutionNotifier()
     last_processed_bar_time: str | None = None
-    print(f"PRAGMA WATCH started | symbol={args.symbol} | poll={args.interval_sec}s")
+    profile_name = get_instrument_profile(args.symbol).name
+    print(f"PRAGMA WATCH started | symbol={args.symbol} | profile={profile_name} | poll={args.interval_sec}s")
     try:
         while True:
             try:
@@ -292,7 +312,8 @@ def _watch(args: argparse.Namespace) -> int:
                         symbol=args.symbol, bars_count=args.bars,
                         profile_bins=args.profile_bins, macro_bias=args.macro_bias,
                         dry_run=False, notifier=notifier, notify_pois=False,
-                        allow_mean_reversion=args.allow_mean_reversion,
+                        allow_mean_reversion=True if args.allow_mean_reversion else None,
+                        disable_trend_pullback=args.disable_trend_pullback,
                         cost_price=args.spread_points * (args.point_size if args.point_size is not None else _default_point_size(args.symbol)),
                     )
                     bar_time = result["bars"]["last_closed_m1_time"]
@@ -305,7 +326,8 @@ def _watch(args: argparse.Namespace) -> int:
                     price = float(result["bars"]["last_closed_m1_close"])
                     print(
                         f"[{stamp}] {args.symbol} {price:.5f} | "
-                        f"{result['regime']} | Active POI: {len(result.get('pois', []))} | {status}",
+                        f"{result['instrument_profile']} | {result['regime']} | "
+                        f"Active POI: {len(result.get('pois', []))} | {status}",
                         flush=True,
                     )
             except Exception as exc:
@@ -329,7 +351,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--interval-sec", type=int, default=15,
                         help="Watch polling interval in seconds (default: 15)")
     parser.add_argument("--allow-mean-reversion", action="store_true",
-                        help="Opt in to BALANCE mean-reversion POIs (disabled by default)")
+                        help="Override the instrument profile and enable BALANCE mean-reversion POIs")
+    parser.add_argument("--disable-trend-pullback", action="store_true",
+                        help="Override the instrument profile and disable trend-pullback POIs")
     parser.add_argument("--spread-points", type=float, default=0.0,
                         help="Spread/slippage cost in instrument points")
     parser.add_argument("--point-size", type=float, default=None,
@@ -347,7 +371,8 @@ def main(argv: list[str] | None = None) -> int:
     result = run_pipeline(
         symbol=args.symbol, bars_count=args.bars, profile_bins=args.profile_bins,
         macro_bias=args.macro_bias, dry_run=args.dry_run,
-        allow_mean_reversion=args.allow_mean_reversion, cost_price=cost_price,
+        allow_mean_reversion=True if args.allow_mean_reversion else None,
+        disable_trend_pullback=args.disable_trend_pullback, cost_price=cost_price,
     )
     print(json.dumps(result, indent=2, default=str))
     return 0

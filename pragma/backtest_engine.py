@@ -20,6 +20,7 @@ import pandas as pd
 from pragma.amt_engine import calculate_volume_profile
 from pragma.data.mt5_data import MT5DataClient, filter_closed_bars
 from pragma.macro_gate import MacroGate
+from pragma.instrument_profiles import get_instrument_profile
 from pragma.regime_poi_engine import generate_regime_pois
 from pragma.trigger_engine import evaluate_trigger
 from pragma.vwap_engine import VWAPEngine
@@ -59,6 +60,7 @@ class BacktestReport:
     spread_points: float
     point_size: float
     funnel_counts: dict[str, int]
+    instrument_profile: str = "MOMENTUM_TREND"
     risk_per_trade_pct: float = 1.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -251,7 +253,8 @@ def _daily_group_stats(trades: list[BacktestTrade], field: str) -> dict[str, dic
 
 def _make_report(symbol: str, bars_processed: int, trades: list[BacktestTrade],
                  spread_points: float, point_size: float,
-                 funnel_counts: dict[str, int] | None = None) -> BacktestReport:
+                 funnel_counts: dict[str, int] | None = None,
+                 instrument_profile: str = "MOMENTUM_TREND") -> BacktestReport:
     values = [trade.r_multiple for trade in trades]
     wins = sum(value for value in values if value > 0)
     losses = -sum(value for value in values if value < 0)
@@ -294,6 +297,7 @@ def _make_report(symbol: str, bars_processed: int, trades: list[BacktestTrade],
         spread_points=float(spread_points),
         point_size=float(point_size),
         funnel_counts=dict(funnel_counts or {}),
+        instrument_profile=instrument_profile,
     )
 
 
@@ -307,13 +311,22 @@ def run_backtest(
     spread_points: float = 0.0,
     point_size: float = 0.01,
     allow_range: bool = False,
-    allow_mean_reversion: bool = False,
+    allow_mean_reversion: bool | None = None,
+    disable_trend_pullback: bool = False,
 ) -> BacktestReport:
     """Simulate a single instrument without future-data leakage.
 
     spread_points is multiplied by point_size to produce the adverse price
     cost applied at entry and each exit. Only one position can be open at once.
     """
+    instrument_profile = get_instrument_profile(symbol)
+    effective_allow_mean_reversion = (
+        instrument_profile.allow_mean_reversion
+        if allow_mean_reversion is None else bool(allow_mean_reversion)
+    )
+    effective_allow_trend_pullback = (
+        instrument_profile.allow_trend_pullback and not disable_trend_pullback
+    )
     if macro_bias not in (-1, 0, 1):
         raise ValueError("macro_bias must be -1, 0, or +1")
     if profile_bins < 2:
@@ -406,7 +419,12 @@ def run_backtest(
         price = float(bar["close"])
         regime_decision = generate_regime_pois(
             macro_bias, profile, latest_vwap, price, atr,
-            allow_range=allow_range, allow_mean_reversion=allow_mean_reversion,
+            allow_range=allow_range,
+            allow_mean_reversion=effective_allow_mean_reversion,
+            allow_trend_pullback=effective_allow_trend_pullback,
+            poi_atr_multiplier=instrument_profile.poi_atr_multiplier,
+            imbalance_vwap_poc_atr=instrument_profile.imbalance_vwap_poc_atr,
+            mean_reversion_confluence_atr=instrument_profile.mean_reversion_confluence_atr,
         )
         if regime_decision.pois:
             funnel_counts["bars_with_active_poi"] += 1
@@ -417,6 +435,8 @@ def run_backtest(
                 m1.iloc[max(0, i - 29):i + 1], poi.direction,
                 poi.poi_low, poi.poi_high, atr, poi.take_profits,
                 poi_type=poi.poi_type, center_price=poi.center, cost_price=cost,
+                sl_atr_buffer=instrument_profile.sl_atr_buffer,
+                min_spread_to_sl_ratio=instrument_profile.min_spread_to_sl_ratio,
             )
             metrics = decision.metrics
             if metrics.get("poi_touched"):
@@ -479,7 +499,10 @@ def run_backtest(
             "END_OF_DATA", float(position.r_multiple), position.tp1_taken,
         ))
 
-    return _make_report(symbol, processed, trades, spread_points, point_size, funnel_counts)
+    return _make_report(
+        symbol, processed, trades, spread_points, point_size, funnel_counts,
+        instrument_profile=instrument_profile.name,
+    )
 
 
 def _synthetic_bars(count: int, end_time: pd.Timestamp | None = None) -> pd.DataFrame:
@@ -517,7 +540,7 @@ def _default_point_size(symbol: str) -> float:
 
 def _print_report(report: BacktestReport) -> None:
     print("\n=== PRAGMA WALK-FORWARD BACKTEST ===")
-    print(f"Symbol: {report.symbol} | Bars: {report.bars_processed} | Trades: {report.total_trades}")
+    print(f"Symbol: {report.symbol} | Profile: {report.instrument_profile} | Bars: {report.bars_processed} | Trades: {report.total_trades}")
     print(f"Win rate: {report.win_rate:.2%} | Profit factor: {report.profit_factor:.3f}")
     print(f"Net R: {report.net_r:.3f} | Expectancy: {report.expectancy_r:.4f} R/trade")
     print(f"Max drawdown: {report.max_drawdown_r:.3f} R")
@@ -548,7 +571,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--point-size", type=float, default=None,
                         help="Price units per point; inferred by symbol when omitted")
     parser.add_argument("--allow-mean-reversion", action="store_true",
-                        help="Opt in to BALANCE mean-reversion POIs (disabled by default)")
+                        help="Override the instrument profile and enable BALANCE mean-reversion POIs")
+    parser.add_argument("--disable-trend-pullback", action="store_true",
+                        help="Override the instrument profile and disable trend-pullback POIs")
     parser.add_argument("--dry-run", action="store_true",
                         help="Use deterministic synthetic M1 data instead of MT5")
     args = parser.parse_args(argv)
@@ -576,7 +601,8 @@ def main(argv: list[str] | None = None) -> int:
         m1, symbol=args.symbol, macro_bias=bias, m15_bars=m15,
         profile_bins=args.profile_bins, spread_points=args.spread_points,
         point_size=point_size, allow_range=allow_range,
-        allow_mean_reversion=args.allow_mean_reversion,
+        allow_mean_reversion=True if args.allow_mean_reversion else None,
+        disable_trend_pullback=args.disable_trend_pullback,
     )
     _print_report(report)
     print("\nJSON:")

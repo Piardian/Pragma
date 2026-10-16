@@ -99,10 +99,11 @@ class BinanceDataClient:
     """Paginated, public Binance Futures/Spot klines client with incremental CSV cache."""
 
     def __init__(self, cache_dir: str | Path = "data_cache", *, no_cache: bool = False,
-                 timeout: float = 15.0, sleep_seconds: float = 0.15,
+                 futures_only: bool = False, timeout: float = 15.0, sleep_seconds: float = 0.15,
                  opener: Callable | None = None):
         self.cache_dir = Path(cache_dir)
         self.no_cache = bool(no_cache)
+        self.futures_only = bool(futures_only)
         self.timeout = float(timeout)
         self.sleep_seconds = max(0.0, float(sleep_seconds))
         self._opener = opener or urlopen
@@ -166,7 +167,7 @@ class BinanceDataClient:
 
     def _fetch_before(self, symbol: str, interval: str, end_time: int,
                       limit: int, *, force_spot: bool = False) -> tuple[pd.DataFrame, str]:
-        urls = [SPOT_URL] if force_spot else [FUTURES_URL, SPOT_URL]
+        urls = [SPOT_URL] if force_spot else ([FUTURES_URL] if self.futures_only else [FUTURES_URL, SPOT_URL])
         errors = []
         for url in urls:
             try:

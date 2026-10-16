@@ -650,7 +650,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="Use deterministic synthetic M1 data instead of MT5")
     args = parser.parse_args(argv)
-    point_size = args.point_size if args.point_size is not None else _default_point_size(args.symbol)
+    if args.scan_crypto:
+        symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT")
+        results = []
+        for crypto_symbol in symbols:
+            try:
+                client = BinanceDataClient(no_cache=args.no_cache)
+                m1 = client.rates(crypto_symbol, "M1", args.bars)
+                m15 = client.rates(crypto_symbol, "M15", max(300, args.bars // 15 + 50))
+                m1.attrs["source"] = "binance"
+                m15.attrs["source"] = "binance"
+                bias = args.macro_bias if args.macro_bias is not None else 1
+                crypto_point = args.point_size if args.point_size is not None else 0.01
+                effective_spread = max(args.spread_points, float(m1["close"].iloc[-1]) * 0.0004 / crypto_point)
+                report = run_backtest(m1, symbol=crypto_symbol, macro_bias=bias, m15_bars=m15,
+                    profile_bins=args.profile_bins, spread_points=effective_spread, point_size=crypto_point,
+                    allow_mean_reversion=True if args.allow_mean_reversion else None,
+                    disable_trend_pullback=args.disable_trend_pullback, trigger_tf=args.trigger_tf,
+                    tp1_close_pct=args.tp1_close_pct, be_offset_r=None if args.no_breakeven else args.be_offset_r)
+                results.append(report.to_dict())
+            except Exception as exc:
+                results.append({"symbol": crypto_symbol, "error": str(exc)})
+        print(json.dumps(results, indent=2, allow_nan=True))
+        return 0
+    source = ("binance" if str(args.symbol).upper().endswith("USDT") else "mt5") if args.source == "auto" else args.source
+    symbol = normalize_binance_symbol(args.symbol) if source == "binance" else args.symbol
+    point_size = args.point_size if args.point_size is not None else (0.01 if source == "binance" else _default_point_size(symbol))
     if args.dry_run:
         m1 = _synthetic_bars(args.bars)
         m15 = _resample_m15(m1)
@@ -664,9 +689,16 @@ def main(argv: list[str] | None = None) -> int:
         else:
             bias = args.macro_bias
             allow_range = False
-        with MT5DataClient() as client:
-            m1 = client.rates(args.symbol, "M1", args.bars)
-            m15 = client.rates(args.symbol, "M15", max(300, args.bars // 15 + 50))
+        if source == "binance":
+            client = BinanceDataClient(no_cache=args.no_cache)
+            m1 = client.rates(symbol, "M1", args.bars)
+            m15 = client.rates(symbol, "M15", max(300, args.bars // 15 + 50))
+            m1.attrs["source"] = "binance"
+            m15.attrs["source"] = "binance"
+        else:
+            with MT5DataClient() as client:
+                m1 = client.rates(symbol, "M1", args.bars)
+                m15 = client.rates(symbol, "M15", max(300, args.bars // 15 + 50))
         now = pd.Timestamp.now(tz="UTC")
         m1 = filter_closed_bars(m1, "M1", now=now)
         m15 = filter_closed_bars(m15, "M15", now=now)
@@ -680,8 +712,7 @@ def main(argv: list[str] | None = None) -> int:
         be_offset_r=None if args.no_breakeven else args.be_offset_r,
     )
     _print_report(report)
-    print("
-JSON:")
+    print("\nJSON:")
     print(json.dumps(report.to_dict(), indent=2, allow_nan=True))
     return 0
 

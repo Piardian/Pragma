@@ -19,7 +19,7 @@ import pandas as pd
 from pragma.amt_engine import AMTEngine, calculate_session_profiles
 from pragma.data.mt5_data import MT5DataClient, filter_closed_bars
 from pragma.execution_notifier import ExecutionNotifier
-from pragma.macro_gate import MacroGate
+from pragma.macro_gate import MacroGate, refresh_begonya_gate
 from pragma.regime_poi_engine import generate_regime_pois
 from pragma.trigger_engine import evaluate_trigger
 from pragma.vwap_engine import VWAPEngine
@@ -334,7 +334,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="Spread/slippage cost in instrument points")
     parser.add_argument("--point-size", type=float, default=None,
                         help="Price units per point; inferred by symbol when omitted")
+    parser.add_argument("--refresh-macro", action="store_true",
+                        help="Refresh Begonya macro gate first if missing or stale")
     args = parser.parse_args(argv)
+    if args.refresh_macro:
+        refresh_result = refresh_begonya_gate()
+        print("MACRO_REFRESH: " + json.dumps(refresh_result, default=str), flush=True)
     if args.watch:
         return _watch(args)
     point_size = args.point_size if args.point_size is not None else _default_point_size(args.symbol)

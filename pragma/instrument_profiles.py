@@ -14,6 +14,8 @@ class InstrumentProfile:
     imbalance_vwap_poc_atr: float
     mean_reversion_confluence_atr: float
     min_spread_to_sl_ratio: float
+    min_rr_tp1: float = 1.5
+    min_rr_tp2: float = 2.0
 
 
 MOMENTUM_TREND = InstrumentProfile(
@@ -31,11 +33,13 @@ FX_MEAN_REVERSION = InstrumentProfile(
     name="FX_MEAN_REVERSION",
     allow_trend_pullback=False,
     allow_mean_reversion=True,
-    poi_atr_multiplier=0.55,
-    sl_atr_buffer=0.95,
+    poi_atr_multiplier=0.45,
+    sl_atr_buffer=0.65,
     imbalance_vwap_poc_atr=0.15,
     mean_reversion_confluence_atr=1.0,
     min_spread_to_sl_ratio=3.0,
+    min_rr_tp1=1.0,
+    min_rr_tp2=1.35,
 )
 
 _MOMENTUM_SYMBOLS = frozenset({

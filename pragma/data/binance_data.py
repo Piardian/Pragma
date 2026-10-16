@@ -6,8 +6,11 @@ The adapter returns the same UTC DatetimeIndex/OHLC/tick_volume shape as MT5Data
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import csv
+import io
 import json
 import time
+import zipfile
 from pathlib import Path
 from typing import Callable
 from urllib.error import HTTPError, URLError
@@ -177,6 +180,74 @@ class BinanceDataClient:
                 errors.append(f"{url}: {exc}")
         raise BinanceDataError("All Binance endpoints failed: " + " | ".join(errors))
 
+    def _rates_from_vision_archive(self, symbol: str, interval: str, count: int,
+                                   timeframe: str) -> pd.DataFrame:
+        """Fallback to Binance's official USD-M Futures public data archive (HTTP 451 regions)."""
+        now = pd.Timestamp.now(tz="UTC")
+        interval_ms = _INTERVAL_MS[interval]
+        start = now - pd.Timedelta(milliseconds=count * interval_ms)
+        current_month = now.normalize().replace(day=1)
+        frames: list[pd.DataFrame] = []
+
+        def fetch_archive(url: str) -> pd.DataFrame:
+            request = Request(url, headers={"User-Agent": "Pragma/1.0"})
+            with self._opener(request, timeout=max(self.timeout, 30.0)) as response:
+                payload = response.read()
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                csv_names = [name for name in archive.namelist() if name.lower().endswith(".csv")]
+                if not csv_names:
+                    return pd.DataFrame()
+                with archive.open(csv_names[0]) as stream:
+                    rows = list(csv.reader(io.TextIOWrapper(stream, encoding="utf-8")))
+            if rows and rows[0] and rows[0][0].strip().lower() in {"open_time", "open time"}:
+                rows = rows[1:]
+            return _parse_rows(rows)
+
+        # Binance publishes completed months as monthly archives. The current
+        # month is fetched day-by-day because its monthly archive is not final.
+        cursor = start.normalize().replace(day=1)
+        while cursor < current_month:
+            month = cursor.strftime("%Y-%m")
+            url = (f"https://data.binance.vision/data/futures/um/monthly/klines/"
+                   f"{symbol}/{interval}/{symbol}-{interval}-{month}.zip")
+            try:
+                frame = fetch_archive(url)
+                if not frame.empty:
+                    frames.append(frame)
+            except HTTPError as exc:
+                if exc.code != 404:
+                    raise
+            cursor = cursor + pd.offsets.MonthBegin(1)
+
+        day = current_month
+        while day <= now.normalize():
+            date = day.strftime("%Y-%m-%d")
+            url = (f"https://data.binance.vision/data/futures/um/daily/klines/"
+                   f"{symbol}/{interval}/{symbol}-{interval}-{date}.zip")
+            try:
+                frame = fetch_archive(url)
+                if not frame.empty:
+                    frames.append(frame)
+            except HTTPError as exc:
+                # Today's archive may not be published until the UTC day closes.
+                if exc.code != 404:
+                    raise
+            day += pd.Timedelta(days=1)
+
+        if not frames:
+            raise BinanceDataError(f"No Binance USD-M Futures archive data returned for {symbol} {timeframe}")
+        result = pd.concat(frames).sort_index()
+        result = result[~result.index.duplicated(keep="last")]
+        result = filter_closed_bars(result, timeframe)
+        if len(result) < count:
+            raise BinanceDataError(
+                f"Insufficient USD-M Futures archive history for {symbol} {timeframe}: "
+                f"{len(result)} closed bars, requested {count}"
+            )
+        result = result.tail(count).copy()
+        result.attrs["source"] = "binance_usdm_futures_archive"
+        return result
+
     def rates(self, symbol: str, timeframe: str = "M1", count: int = 1500) -> pd.DataFrame:
         if count <= 0:
             raise ValueError("count must be positive")
@@ -192,53 +263,60 @@ class BinanceDataClient:
         interval_ms = _INTERVAL_MS[interval]
 
         frames: list[pd.DataFrame] = []
-        if not cached.empty and not self.no_cache:
-            frames.append(cached)
-            latest_open_ms = int(cached.index[-1].timestamp() * 1000)
-            # 1. Forward sync: fetch new bars up to now
-            if latest_open_ms + interval_ms < now_ms:
-                gap_bars = max(2, int((now_ms - latest_open_ms) // interval_ms) + 2)
-                new_page, _ = self._fetch_before(symbol, interval, now_ms, min(1500, gap_bars))
-                if not new_page.empty:
-                    frames.append(new_page)
-            curr = pd.concat(frames).sort_index()
-            curr = curr[~curr.index.duplicated(keep="last")]
-            closed_curr = filter_closed_bars(curr, tf)
-            # 2. Backward backfill: if requested count > available closed bars
-            if len(closed_curr) < count:
-                needed = count - len(closed_curr) + 2
-                oldest_ms = int(curr.index[0].timestamp() * 1000)
-                end_time = oldest_ms - 1
-                while needed > 0:
-                    page_limit = min(needed, 1500)
+        try:
+            if not cached.empty and not self.no_cache:
+                frames.append(cached)
+                latest_open_ms = int(cached.index[-1].timestamp() * 1000)
+                # 1. Forward sync: fetch new bars up to now
+                if latest_open_ms + interval_ms < now_ms:
+                    gap_bars = max(2, int((now_ms - latest_open_ms) // interval_ms) + 2)
+                    new_page, _ = self._fetch_before(symbol, interval, now_ms, min(1500, gap_bars))
+                    if not new_page.empty:
+                        frames.append(new_page)
+                curr = pd.concat(frames).sort_index()
+                curr = curr[~curr.index.duplicated(keep="last")]
+                closed_curr = filter_closed_bars(curr, tf)
+                # 2. Backward backfill: if requested count > available closed bars
+                if len(closed_curr) < count:
+                    needed = count - len(closed_curr) + 2
+                    oldest_ms = int(curr.index[0].timestamp() * 1000)
+                    end_time = oldest_ms - 1
+                    while needed > 0:
+                        page_limit = min(needed, 1500)
+                        page, _ = self._fetch_before(symbol, interval, end_time, page_limit)
+                        if page.empty:
+                            break
+                        frames.append(page)
+                        oldest_ms = int(page.index[0].timestamp() * 1000)
+                        needed -= len(page)
+                        if oldest_ms <= 0 or len(page) < min(page_limit, 1000):
+                            break
+                        end_time = oldest_ms - 1
+                        if self.sleep_seconds and needed > 0:
+                            time.sleep(self.sleep_seconds)
+            else:
+                # Cold fetch: page backward from now until at least count + 2 closed bars collected
+                remaining = count + 2
+                end_time = now_ms
+                while remaining > 0:
+                    page_limit = min(remaining, 1500)
                     page, _ = self._fetch_before(symbol, interval, end_time, page_limit)
                     if page.empty:
                         break
                     frames.append(page)
                     oldest_ms = int(page.index[0].timestamp() * 1000)
-                    needed -= len(page)
+                    remaining -= len(page)
                     if oldest_ms <= 0 or len(page) < min(page_limit, 1000):
                         break
                     end_time = oldest_ms - 1
-                    if self.sleep_seconds and needed > 0:
+                    if self.sleep_seconds and remaining > 0:
                         time.sleep(self.sleep_seconds)
-        else:
-            # Cold fetch: page backward from now until at least count + 2 closed bars collected
-            remaining = count + 2
-            end_time = now_ms
-            while remaining > 0:
-                page_limit = min(remaining, 1500)
-                page, _ = self._fetch_before(symbol, interval, end_time, page_limit)
-                if page.empty:
-                    break
-                frames.append(page)
-                oldest_ms = int(page.index[0].timestamp() * 1000)
-                remaining -= len(page)
-                if oldest_ms <= 0 or len(page) < min(page_limit, 1000):
-                    break
-                end_time = oldest_ms - 1
-                if self.sleep_seconds and remaining > 0:
-                    time.sleep(self.sleep_seconds)
+
+
+        except BinanceDataError as exc:
+            if self.futures_only and "HTTP Error 451" in str(exc):
+                return self._rates_from_vision_archive(symbol, interval, count, tf)
+            raise
 
         if not frames:
             raise BinanceDataError(f"No Binance klines returned for {symbol} {tf}")

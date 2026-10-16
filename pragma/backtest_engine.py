@@ -284,7 +284,7 @@ def _make_report(symbol: str, bars_processed: int, trades: list[BacktestTrade],
     trade_outcomes = {
         "full_sl_hits": sum(t.exit_reason == "STOP_LOSS" and not t.tp1_taken for t in trades),
         "tp1_then_be_hits": sum(t.tp1_taken and t.exit_reason in {"BREAKEVEN_STOP", "TP1_THEN_BREAKEVEN_SAME_BAR"} for t in trades),
-        "full_tp2_hits": sum(t.tp1_taken and t.exit_reason in {"TAKE_PROFIT_2", "TP1_TP2_SAME_BAR"} for t in trades),
+        "full_tp2_hits": sum(t.exit_reason in {"TAKE_PROFIT_2", "TP1_TP2_SAME_BAR", "TAKE_PROFIT_2_SINGLE_TARGET"} for t in trades),
     }
     wins = sum(value for value in values if value > 0)
     losses = -sum(value for value in values if value < 0)
@@ -482,7 +482,7 @@ def run_backtest(
         decisions = []
         for poi in regime_decision.pois:
             decision = evaluate_trigger(
-                eligible_triggers.iloc[max(0, len(eligible_triggers) - 20):], poi.direction,
+                eligible_triggers.iloc[max(0, len(eligible_triggers) - 30):], poi.direction,
                 poi.poi_low, poi.poi_high, atr, poi.take_profits,
                 poi_type=poi.poi_type, center_price=poi.center, cost_price=cost,
                 sl_atr_buffer=instrument_profile.sl_atr_buffer,

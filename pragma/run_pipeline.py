@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from pragma.amt_engine import AMTEngine, calculate_session_profiles
-from pragma.data.mt5_data import MT5DataClient, filter_closed_bars\nfrom pragma.data.binance_data import BinanceDataClient, normalize_binance_symbol
+from pragma.data.mt5_data import MT5DataClient, filter_closed_bars\nfrom pragma.data.binance_data import BinanceDataClient, normalize_binance_symbol, btc_leader_allows_direction
 from pragma.execution_notifier import ExecutionNotifier
 from pragma.macro_gate import MacroGate, refresh_begonya_gate
 from pragma.instrument_profiles import canonical_symbol, default_trigger_tf_for_symbol, get_instrument_profile, normalize_trigger_tf, trigger_tf_minutes

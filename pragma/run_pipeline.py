@@ -20,7 +20,7 @@ from pragma.amt_engine import AMTEngine, calculate_session_profiles
 from pragma.data.mt5_data import MT5DataClient, filter_closed_bars
 from pragma.execution_notifier import ExecutionNotifier
 from pragma.macro_gate import MacroGate, refresh_begonya_gate
-from pragma.instrument_profiles import canonical_symbol, get_instrument_profile, normalize_trigger_tf, trigger_tf_minutes
+from pragma.instrument_profiles import canonical_symbol, default_trigger_tf_for_symbol, get_instrument_profile, normalize_trigger_tf, trigger_tf_minutes
 from pragma.regime_poi_engine import generate_regime_pois
 from pragma.trigger_engine import evaluate_trigger
 from pragma.vwap_engine import VWAPEngine
@@ -117,7 +117,7 @@ def run_pipeline(
         clock = clock.tz_convert("UTC")
 
     instrument_profile = get_instrument_profile(symbol)
-    trigger_tf = normalize_trigger_tf(trigger_tf or instrument_profile.default_trigger_tf)
+    trigger_tf = normalize_trigger_tf(trigger_tf or default_trigger_tf_for_symbol(symbol))
     effective_allow_mean_reversion = (
         instrument_profile.allow_mean_reversion
         if allow_mean_reversion is None else bool(allow_mean_reversion)
@@ -373,7 +373,7 @@ def _scan_begonya_once(args: argparse.Namespace, notifier: Any | None = None) ->
             row = {
                 "symbol": symbol, "bias": gate_bias,
                 "profile": profile.name,
-                "trigger_tf": normalize_trigger_tf(args.trigger_tf or profile.default_trigger_tf),
+                "trigger_tf": normalize_trigger_tf(args.trigger_tf or default_trigger_tf_for_symbol(symbol)),
                 "regime": "-", "pois": 0, "status": f"ERROR: {exc}",
                 "result": None,
             }
@@ -424,7 +424,7 @@ def _watch(args: argparse.Namespace) -> int:
                                 "symbol": symbol, "bias": bias,
                                 "profile": get_instrument_profile(symbol).name,
                                 "trigger_tf": normalize_trigger_tf(
-                                    args.trigger_tf or get_instrument_profile(symbol).default_trigger_tf
+                                    args.trigger_tf or default_trigger_tf_for_symbol(symbol)
                                 ),
                                 "regime": "-", "pois": 0, "status": "NO_CLOSED_BAR",
                             }

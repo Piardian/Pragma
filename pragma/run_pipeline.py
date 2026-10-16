@@ -172,7 +172,7 @@ def run_pipeline(
         session_key = "session"
         m15 = _closed_m15_from_m1(m1, clock)
     elif selected_source == "binance":
-        with BinanceDataClient(no_cache=no_cache) as client:
+        with BinanceDataClient(no_cache=no_cache, futures_only=True) as client:
             raw_m1 = client.rates(symbol, "M1", bars_count)
             raw_m15 = client.rates(symbol, "M15", max(200, bars_count // 15 + 50))
         raw_m1.attrs["source"] = "binance"

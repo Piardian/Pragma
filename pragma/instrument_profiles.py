@@ -57,10 +57,9 @@ def canonical_symbol(symbol: str) -> str:
     for suffix in (".PRO", ".A", ".M", ".RAW", ".ECN"):
         if value.endswith(suffix):
             value = value[:-len(suffix)]
-    if value.endswith("M") and value[:-1] in _MOMENTUM_SYMBOLS | {
-        "EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "USDCAD", "USDCHF",
-        "EURGBP", "AUDJPY", "EURTRY",
-    }:
+    if value.endswith("M") and (
+        value[:-1] in _MOMENTUM_SYMBOLS or _is_fx_cross(value[:-1])
+    ):
         value = value[:-1]
     if value.endswith(("USDT", "USDC")) and value[:-4] in {"BTC", "ETH", "SOL"}:
         value = value[:-4] + "USD"

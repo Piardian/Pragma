@@ -31,8 +31,6 @@ class POI:
         return self.take_profits[0]
 
 
-# Explicit interface name used by the orchestration layer; POI remains an alias
-# for compatibility with earlier callers.
 POIZone = POI
 
 
@@ -219,14 +217,13 @@ def generate_regime_pois(
                 match = ((level + lower_1_5) / 2.0, (level_name, "lower_1p5sigma"))
             if match:
                 add("LONG", "LONG_MEAN_REVERSION", match[0],
-                    (lower_1, vwap_value, poc), match[1])
+                    (lower_1, vwap_value, poc, upper_1, vah), match[1])
             elif (level_name == "pdVAL"
                   and (macro_bias == 1 or (macro_bias == 0 and allow_range))
                   and abs(price - val) <= half_width and price <= vwap_value):
                 add("LONG", "LONG_MEAN_REVERSION", val,
-                    (lower_1, vwap_value, poc), ("pdVAL", "direct_level_touch", "vwap_midpoint"))
-    # Require VWAP to separate materially from prior-session POC before
-    # treating an upside imbalance as a tradable trend regime.
+                    (lower_1, vwap_value, poc, upper_1, vah),
+                    ("pdVAL", "direct_level_touch", "vwap_midpoint"))
     bull_imbalance_quality = vwap_value >= poc + (float(imbalance_vwap_poc_atr) * atr)
     bear_imbalance_quality = vwap_value <= poc - (float(imbalance_vwap_poc_atr) * atr)
     if allow_trend_pullback and macro_bias == 1 and regime == MarketRegime.IMBALANCE_BULL and bull_imbalance_quality:
@@ -235,8 +232,6 @@ def generate_regime_pois(
             if match:
                 add("LONG", "LONG_TREND_PULLBACK", match[0],
                     (upper_1_5, upper_2_5), match[1])
-        # When price has broken above value and pulls back toward active VWAP
-        # or its lower 1-sigma band, create a level-centred continuation POI.
         if price > vah and vwap_value > poc:
             pullback_levels = [
                 (name, level) for name, level in
@@ -266,20 +261,19 @@ def generate_regime_pois(
                 match = ((level + upper_1_5) / 2.0, (level_name, "upper_1p5sigma"))
             if match:
                 add("SHORT", "SHORT_MEAN_REVERSION", match[0],
-                    (upper_1, vwap_value, poc), match[1])
+                    (upper_1, vwap_value, poc, lower_1, val), match[1])
             elif (level_name == "pdVAH"
                   and (macro_bias == -1 or (macro_bias == 0 and allow_range))
                   and abs(price - vah) <= half_width and price >= vwap_value):
                 add("SHORT", "SHORT_MEAN_REVERSION", vah,
-                    (upper_1, vwap_value, poc), ("pdVAH", "direct_level_touch", "vwap_midpoint"))
+                    (upper_1, vwap_value, poc, lower_1, val),
+                    ("pdVAH", "direct_level_touch", "vwap_midpoint"))
     if allow_trend_pullback and macro_bias == -1 and regime == MarketRegime.IMBALANCE_BEAR and bear_imbalance_quality:
         for name, level in (("upper_1p0sigma", upper_1), ("vwap", vwap_value)):
             match = _pair_if_confluent("pdVAL", val, name, level, tolerance)
             if match:
                 add("SHORT", "SHORT_TREND_PULLBACK", match[0],
                     (lower_1_5, lower_2_5), match[1])
-        # Symmetric continuation setup: after a break below value, price
-        # retraces toward active VWAP or its upper 1-sigma band.
         if price < val and vwap_value < poc:
             pullback_levels = [
                 (name, level) for name, level in
@@ -304,7 +298,7 @@ def generate_regime_pois(
             )
             if match and not counter_short_locked:
                 add("SHORT", "SHORT_MEAN_REVERSION", match[0],
-                    (upper_1, vwap_value, poc), match[1])
+                    (upper_1, vwap_value, poc, lower_1, val), match[1])
 
     unique: list[POIZone] = []
     seen: set[tuple[str, str, float]] = set()

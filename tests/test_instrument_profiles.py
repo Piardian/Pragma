@@ -40,10 +40,12 @@ class InstrumentProfileTests(unittest.TestCase):
         self.assertEqual(FX_MEAN_REVERSION.name, "FX_MEAN_REVERSION")
         self.assertFalse(FX_MEAN_REVERSION.allow_trend_pullback)
         self.assertTrue(FX_MEAN_REVERSION.allow_mean_reversion)
-        self.assertEqual(FX_MEAN_REVERSION.poi_atr_multiplier, 0.55)
-        self.assertEqual(FX_MEAN_REVERSION.sl_atr_buffer, 0.95)
+        self.assertEqual(FX_MEAN_REVERSION.poi_atr_multiplier, 0.45)
+        self.assertEqual(FX_MEAN_REVERSION.sl_atr_buffer, 0.65)
         self.assertEqual(FX_MEAN_REVERSION.mean_reversion_confluence_atr, 1.0)
         self.assertEqual(FX_MEAN_REVERSION.min_spread_to_sl_ratio, 3.0)
+        self.assertEqual(FX_MEAN_REVERSION.min_rr_tp1, 1.0)
+        self.assertEqual(FX_MEAN_REVERSION.min_rr_tp2, 1.35)
 
     def test_symbol_canonicalization(self):
         self.assertEqual(canonical_symbol("XAUUSD.a"), "XAUUSD")
@@ -100,7 +102,7 @@ class InstrumentProfileTests(unittest.TestCase):
         self.assertTrue(captured)
         self.assertTrue(captured[0]["allow_mean_reversion"])
         self.assertFalse(captured[0]["allow_trend_pullback"])
-        self.assertEqual(captured[0]["poi_atr_multiplier"], 0.55)
+        self.assertEqual(captured[0]["poi_atr_multiplier"], 0.45)
         self.assertEqual(captured[0]["mean_reversion_confluence_atr"], 1.0)
 
     def test_trigger_uses_profile_stop_buffer_and_spread_ratio(self):
@@ -124,7 +126,7 @@ class InstrumentProfileTests(unittest.TestCase):
             sl_atr_buffer=FX_MEAN_REVERSION.sl_atr_buffer,
             min_spread_to_sl_ratio=FX_MEAN_REVERSION.min_spread_to_sl_ratio,
         )
-        self.assertAlmostEqual(result.stop_loss, 98.0 - 0.95 * 2.0)
+        self.assertAlmostEqual(result.stop_loss, 98.0 - 0.65 * 2.0)
         self.assertEqual(result.metrics["min_spread_to_sl_ratio"], 3.0)
         self.assertFalse(result.metrics["high_spread_to_sl"])
         self.assertNotEqual(result.reason, "HIGH_SPREAD_TO_SL")

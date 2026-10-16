@@ -25,8 +25,14 @@ class TriggerDecision:
     metrics: dict[str, Any]
 
 
-def _select_targets(targets: float | Sequence[float], direction: str,
-                    entry: float) -> tuple[float | None, float | None]:
+def _select_targets(
+    targets: float | Sequence[float],
+    direction: str,
+    entry: float,
+    *,
+    risk: float | None = None,
+    min_rr_tp1: float | None = None,
+) -> tuple[float | None, float | None]:
     if isinstance(targets, (int, float, np.number)):
         candidates = [float(targets)]
     else:
@@ -39,6 +45,23 @@ def _select_targets(targets: float | Sequence[float], direction: str,
         candidates = sorted({value for value in candidates if value < entry}, reverse=True)
     if not candidates:
         return None, None
+
+    # Mean-reversion target selection is risk-aware: ignore intermediate
+    # targets that cannot satisfy the TP1 R:R floor, then use the furthest
+    # remaining target as TP2. If nothing qualifies, preserve the nearest /
+    # furthest pair so the normal LOW_RR gate can report the rejection.
+    if (
+        min_rr_tp1 is not None
+        and risk is not None
+        and risk > 0
+        and min_rr_tp1 > 0
+    ):
+        qualified = [
+            value for value in candidates
+            if abs(value - entry) / risk >= float(min_rr_tp1)
+        ]
+        if qualified:
+            candidates = qualified
     return candidates[0], candidates[-1]
 
 
@@ -59,6 +82,8 @@ def evaluate_trigger(
     cost_price: float = 0.0,
     sl_atr_buffer: float = 0.50,
     min_spread_to_sl_ratio: float = 4.0,
+    min_rr_tp1: float = 1.0,
+    min_rr_tp2: float = 1.35,
 ) -> TriggerDecision:
     """Evaluate closed M1 bars using POI touch, Z recovery and volume climax."""
     direction = direction.upper()
@@ -85,6 +110,10 @@ def evaluate_trigger(
         raise ValueError("atr_14 must be a finite number greater than zero")
     if min_rr <= 0 or volume_multiplier <= 0:
         raise ValueError("min_rr and volume_multiplier must be positive")
+    if not isfinite(float(min_rr_tp1)) or float(min_rr_tp1) <= 0:
+        raise ValueError("min_rr_tp1 must be finite and positive")
+    if not isfinite(float(min_rr_tp2)) or float(min_rr_tp2) <= 0:
+        raise ValueError("min_rr_tp2 must be finite and positive")
     if not isfinite(float(sl_atr_buffer)) or float(sl_atr_buffer) < 0:
         raise ValueError("sl_atr_buffer must be finite and non-negative")
     if not isfinite(float(min_spread_to_sl_ratio)) or float(min_spread_to_sl_ratio) <= 0:
@@ -141,7 +170,13 @@ def evaluate_trigger(
 
     entry = float(last["close"])
     effective_entry = entry + cost_price if direction == "LONG" else entry - cost_price
-    tp1, tp2 = _select_targets(take_profit, direction, effective_entry)
+    risk = abs(effective_entry - stop_loss)
+    is_mean_reversion = poi_type in ("LONG_MEAN_REVERSION", "SHORT_MEAN_REVERSION")
+    target_tp1_floor = float(min_rr_tp1) if is_mean_reversion else None
+    tp1, tp2 = _select_targets(
+        take_profit, direction, effective_entry,
+        risk=risk, min_rr_tp1=target_tp1_floor,
+    )
     touched_positions = [len(bars) - 3 + offset
                          for offset, touched in enumerate(touch_mask.to_numpy()) if touched]
     climax_pos = None
@@ -155,7 +190,6 @@ def evaluate_trigger(
                 break
     volume_ok = climax_pos is not None
 
-    risk = abs(effective_entry - stop_loss)
     rr_tp1 = abs(tp1 - effective_entry) / risk if tp1 is not None and risk > 0 else None
     rr_tp2 = abs(tp2 - effective_entry) / risk if tp2 is not None and risk > 0 else None
     distinct_targets = bool(
@@ -171,6 +205,14 @@ def evaluate_trigger(
             distinct_targets and rr_tp1 is not None and rr_tp1 < 1.2
             and rr_tp2 is not None and rr_tp2 >= 1.6
         )
+    elif is_mean_reversion:
+        split_rr_ok = bool(
+            distinct_targets and rr_tp1 is not None and rr_tp1 >= float(min_rr_tp1)
+            and rr_tp2 is not None and rr_tp2 >= float(min_rr_tp2)
+        )
+        # Mean-reversion uses risk-aware target selection above instead of
+        # promoting an arbitrary near TP1 to the main target.
+        target_fallback = False
     else:
         split_rr_ok = bool(
             distinct_targets and rr_tp1 is not None and rr_tp1 >= 1.0
@@ -183,13 +225,16 @@ def evaluate_trigger(
     if target_fallback:
         tp1 = tp2
         rr_tp1 = rr_tp2
-    single_target_min_rr = 2.0 if is_trend_pullback else min_rr
+    single_target_min_rr = (
+        float(min_rr_tp2) if is_mean_reversion
+        else 2.0 if is_trend_pullback else min_rr
+    )
     single_target_rr_ok = bool(
         not distinct_targets and rr_tp1 is not None and rr_tp1 >= single_target_min_rr
     )
     rr = rr_tp1
     center = float(center_price) if center_price is not None else (poi_low + poi_high) / 2.0
-    reclaim_required = poi_type in ("LONG_MEAN_REVERSION", "SHORT_MEAN_REVERSION")
+    reclaim_required = is_mean_reversion
     if poi_type == "LONG_MEAN_REVERSION":
         level_reclaim = bool(
             float(last["close"]) >= center
@@ -235,6 +280,8 @@ def evaluate_trigger(
         "level_reclaim_required": reclaim_required,
         "level_reclaim": level_reclaim,
         "min_rr": single_target_min_rr,
+        "min_rr_tp1": float(min_rr_tp1),
+        "min_rr_tp2": float(min_rr_tp2),
         "entry_price": entry,
         "effective_entry": effective_entry,
         "cost_price": cost_price,
@@ -276,6 +323,7 @@ def evaluate_trigger(
     elif not single_target_rr_ok:
         return decision(False, "LOW_RR")
     return decision(True, "EXECUTE")
+
 
 class TriggerEngine:
     def evaluate(self, m1_bars: pd.DataFrame, direction: str, poi_low: float,

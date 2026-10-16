@@ -76,3 +76,5 @@ class Faz81TargetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+# CI coverage for the final FAZ 8.1 branch head.

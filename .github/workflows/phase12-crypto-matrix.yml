@@ -14,6 +14,8 @@ jobs:
   crypto-matrix:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,7 +28,7 @@ jobs:
       - name: Run 8-symbol M5/M15 walk-forward matrix
         run: |
           mkdir -p artifacts
-          python -m pragma.backtest_engine --source binance --scan-crypto --auto-direction --bars 100000 --profile-bins 100 > artifacts/phase12_crypto_matrix.json
+          python -m pragma.backtest_engine --source binance --scan-crypto --auto-direction --bars 100000 --profile-bins 100 --output artifacts/phase12_crypto_matrix.json
       - name: Build comparison table
         if: always()
         run: |

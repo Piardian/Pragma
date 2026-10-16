@@ -138,5 +138,60 @@ class WalkForwardTests(unittest.TestCase):
         self.assertEqual(report.funnel_counts["trades_opened"], 0)
 
 
+class OptimizationAndLeaderFilterTests(unittest.TestCase):
+    def test_precompute_atr14_matches_pointwise_atr14(self):
+        dates = pd.date_range("2026-10-01", periods=50, freq="15min", tz="UTC")
+        np.random.seed(42)
+        m15 = pd.DataFrame({
+            "open": np.random.uniform(100, 200, 50),
+            "high": np.random.uniform(200, 300, 50),
+            "low": np.random.uniform(50, 100, 50),
+            "close": np.random.uniform(100, 200, 50),
+        }, index=dates)
+        precomputed = be._precompute_m15_atr14(m15)
+        self.assertEqual(len(precomputed), len(m15))
+        for i in range(14):
+            self.assertTrue(np.isnan(precomputed[i]))
+        for i in range(14, len(m15)):
+            pointwise = be._atr14(m15.iloc[:i + 1])
+            self.assertIsNotNone(pointwise)
+            self.assertAlmostEqual(precomputed[i], pointwise, places=9)
+
+    def test_btc_leader_filter_suppresses_counter_trend(self):
+        bars = be._synthetic_bars(1500, end_time=pd.Timestamp("2026-10-02T01:00:00Z"))
+        btc_regimes = {t: "IMBALANCE_BEAR" for t in bars.index}
+        with patch.object(
+            be, "generate_regime_pois",
+            return_value=SimpleNamespace(
+                pois=(SimpleNamespace(
+                    direction="LONG", poi_type="LONG_TREND_PULLBACK",
+                    poi_low=100.0, poi_high=102.0, take_profits=(110.0, 115.0),
+                    center=101.0,
+                ),),
+                regime=SimpleNamespace(value="IMBALANCE_BULL")
+            ),
+        ), patch.object(
+            be, "evaluate_trigger",
+            return_value=SimpleNamespace(
+                execute=True, stop_loss=95.0, take_profit_1=110.0, take_profit_2=115.0,
+                metrics={"poi_touched": True, "z_condition": True, "volume_climax": True, "rejection": True},
+                reason=None,
+            ),
+        ):
+            # With btc_leader_filter against ETHUSDT: LONG is suppressed
+            report_eth = be.run_backtest(
+                bars, symbol="ETHUSDT", macro_bias=1, profile_bins=30,
+                btc_regimes=btc_regimes,
+            )
+            self.assertEqual(report_eth.total_trades, 0)
+
+            # For BTCUSDT itself, leader filter does not suppress
+            report_btc = be.run_backtest(
+                bars, symbol="BTCUSDT", macro_bias=1, profile_bins=30,
+                btc_regimes=btc_regimes,
+            )
+            self.assertGreater(report_btc.total_trades, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

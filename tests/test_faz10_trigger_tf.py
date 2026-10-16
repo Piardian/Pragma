@@ -63,9 +63,12 @@ class Faz10TriggerTimeframeTests(unittest.TestCase):
         self.assertEqual(default_trigger_tf_for_symbol("BTCUSD"), "M15")
         for symbol in ("EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "USDCAD", "USDCHF", "EURGBP"):
             self.assertEqual(get_instrument_profile(symbol).default_trigger_tf, "M5", symbol)
-        for symbol in ("BTCUSD", "BTC", "ETHUSD", "SOLUSD", "SOL"):
+        for symbol in ("BTCUSD", "BTC", "ETHUSD"):
             self.assertEqual(get_instrument_profile(symbol), CRYPTO_MOMENTUM, symbol)
             self.assertEqual(default_trigger_tf_for_symbol(symbol), "M15", symbol)
+        for symbol in ("SOLUSD", "SOL"):
+            self.assertEqual(get_instrument_profile(symbol), CRYPTO_MOMENTUM, symbol)
+            self.assertEqual(default_trigger_tf_for_symbol(symbol), "M5", symbol)
         for symbol in ("XAUUSD", "SPX", "US100"):
             self.assertEqual(get_instrument_profile(symbol).default_trigger_tf, "M5", symbol)
 

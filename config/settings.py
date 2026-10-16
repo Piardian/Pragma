@@ -12,6 +12,9 @@ DEFAULT_CRYPTO_SCAN_SYMBOLS = ("BTCUSDT", "SOLUSDT", "LINKUSDT")
 # UTC hour interval [start, end): active London/New York trading window.
 ACTIVE_TRADING_HOURS_UTC = (6, 20)
 
+# Default proven positive-EV crypto basket (Phase 12 matrix whitelist)
+DEFAULT_CRYPTO_SCAN_SYMBOLS = ("BTCUSDT", "SOLUSDT", "LINKUSDT")
+
 
 @dataclass(frozen=True)
 class Settings:

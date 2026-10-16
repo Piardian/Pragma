@@ -1,0 +1,400 @@
+[
+  {
+    "symbol": "BTCUSDT",
+    "bars_processed": 30000,
+    "total_trades": 6,
+    "win_rate": 0.0,
+    "profit_factor": 0.0,
+    "net_r": -6.640518152242918,
+    "expectancy_r": -1.1067530253738196,
+    "max_drawdown_r": 6.640518152242919,
+    "max_daily_drawdown_pct": 2.241453068111255,
+    "max_total_drawdown_pct": 6.45951159443419,
+    "trades_by_regime": {
+      "IMBALANCE_BEAR": {
+        "trades": 3.0,
+        "win_rate": 0.0,
+        "net_r": -3.363028034259748,
+        "expectancy_r": -1.1210093447532492,
+        "profit_factor": 0.0
+      },
+      "IMBALANCE_BULL": {
+        "trades": 3.0,
+        "win_rate": 0.0,
+        "net_r": -3.27749011798317,
+        "expectancy_r": -1.09249670599439,
+        "profit_factor": 0.0
+      }
+    },
+    "trades_by_poi_type": {
+      "LONG_TREND_PULLBACK": {
+        "trades": 3.0,
+        "win_rate": 0.0,
+        "net_r": -3.27749011798317,
+        "expectancy_r": -1.09249670599439,
+        "profit_factor": 0.0
+      },
+      "SHORT_TREND_PULLBACK": {
+        "trades": 3.0,
+        "win_rate": 0.0,
+        "net_r": -3.363028034259748,
+        "expectancy_r": -1.1210093447532492,
+        "profit_factor": 0.0
+      }
+    },
+    "trade_outcomes": {
+      "full_sl_hits": 6,
+      "tp1_then_be_hits": 0,
+      "full_tp2_hits": 0
+    },
+    "spread_points": 3234.364,
+    "point_size": 0.01,
+    "funnel_counts": {
+      "sessions_evaluated": 20,
+      "bars_with_active_poi": 981,
+      "bars_touched_poi": 649,
+      "passed_zscore": 75,
+      "passed_volume": 33,
+      "passed_rejection": 26,
+      "rejected_low_rr": 0,
+      "rejected_session_hours": 984,
+      "rejected_low_volume_day": 2304,
+      "rejected_high_spread_to_sl": 17,
+      "trades_opened": 6
+    },
+    "instrument_profile": "CRYPTO_MOMENTUM",
+    "risk_per_trade_pct": 1.0,
+    "trigger_tf": "M5",
+    "data_source": "binance_usdm_futures",
+    "requested_m1_bars": 30000,
+    "actual_m1_bars": 30000,
+    "cost_bps_per_side": 400.0
+  },
+  {
+    "symbol": "BTCUSDT",
+    "bars_processed": 30000,
+    "total_trades": 3,
+    "win_rate": 0.3333333333333333,
+    "profit_factor": 0.2605874980445423,
+    "net_r": -1.6232265673865647,
+    "expectancy_r": -0.5410755224621883,
+    "max_drawdown_r": 1.6232265673865647,
+    "max_daily_drawdown_pct": 1.6236808025601732,
+    "max_total_drawdown_pct": 1.6236808025601732,
+    "trades_by_regime": {
+      "IMBALANCE_BEAR": {
+        "trades": 3.0,
+        "win_rate": 0.3333333333333333,
+        "net_r": -1.6232265673865647,
+        "expectancy_r": -0.5410755224621883,
+        "profit_factor": 0.2605874980445423
+      }
+    },
+    "trades_by_poi_type": {
+      "SHORT_TREND_PULLBACK": {
+        "trades": 3.0,
+        "win_rate": 0.3333333333333333,
+        "net_r": -1.6232265673865647,
+        "expectancy_r": -0.5410755224621883,
+        "profit_factor": 0.2605874980445423
+      }
+    },
+    "trade_outcomes": {
+      "full_sl_hits": 2,
+      "tp1_then_be_hits": 1,
+      "full_tp2_hits": 0
+    },
+    "spread_points": 3234.364,
+    "point_size": 0.01,
+    "funnel_counts": {
+      "sessions_evaluated": 20,
+      "bars_with_active_poi": 328,
+      "bars_touched_poi": 242,
+      "passed_zscore": 15,
+      "passed_volume": 10,
+      "passed_rejection": 8,
+      "rejected_low_rr": 0,
+      "rejected_session_hours": 328,
+      "rejected_low_volume_day": 768,
+      "rejected_high_spread_to_sl": 9,
+      "trades_opened": 3
+    },
+    "instrument_profile": "CRYPTO_MOMENTUM",
+    "risk_per_trade_pct": 1.0,
+    "trigger_tf": "M15",
+    "data_source": "binance_usdm_futures",
+    "requested_m1_bars": 30000,
+    "actual_m1_bars": 30000,
+    "cost_bps_per_side": 400.0
+  },
+  {
+    "symbol": "SOLUSDT",
+    "bars_processed": 30000,
+    "total_trades": 6,
+    "win_rate": 0.16666666666666666,
+    "profit_factor": 1.2018013899115672,
+    "net_r": 1.091230403074078,
+    "expectancy_r": 0.18187173384567967,
+    "max_drawdown_r": 4.263160555764909,
+    "max_daily_drawdown_pct": 2.2727698175390287,
+    "max_total_drawdown_pct": 4.417024082684904,
+    "trades_by_regime": {
+      "IMBALANCE_BEAR": {
+        "trades": 3.0,
+        "win_rate": 0.3333333333333333,
+        "net_r": 4.319456664119759,
+        "expectancy_r": 1.4398188880399196,
+        "profit_factor": 2.982110290891853
+      },
+      "IMBALANCE_BULL": {
+        "trades": 3.0,
+        "win_rate": 0.0,
+        "net_r": -3.2282262610456804,
+        "expectancy_r": -1.07607542034856,
+        "profit_factor": 0.0
+      }
+    },
+    "trades_by_poi_type": {
+      "LONG_TREND_PULLBACK": {
+        "trades": 3.0,
+        "win_rate": 0.0,
+        "net_r": -3.2282262610456804,
+        "expectancy_r": -1.07607542034856,
+        "profit_factor": 0.0
+      },
+      "SHORT_TREND_PULLBACK": {
+        "trades": 3.0,
+        "win_rate": 0.3333333333333333,
+        "net_r": 4.319456664119759,
+        "expectancy_r": 1.4398188880399196,
+        "profit_factor": 2.982110290891853
+      }
+    },
+    "trade_outcomes": {
+      "full_sl_hits": 5,
+      "tp1_then_be_hits": 0,
+      "full_tp2_hits": 1
+    },
+    "spread_points": 4.1160000000000005,
+    "point_size": 0.01,
+    "funnel_counts": {
+      "sessions_evaluated": 20,
+      "bars_with_active_poi": 1199,
+      "bars_touched_poi": 544,
+      "passed_zscore": 64,
+      "passed_volume": 26,
+      "passed_rejection": 21,
+      "rejected_low_rr": 3,
+      "rejected_session_hours": 1124,
+      "rejected_low_volume_day": 2304,
+      "rejected_high_spread_to_sl": 11,
+      "trades_opened": 6
+    },
+    "instrument_profile": "CRYPTO_MOMENTUM",
+    "risk_per_trade_pct": 1.0,
+    "trigger_tf": "M5",
+    "data_source": "binance_usdm_futures",
+    "requested_m1_bars": 30000,
+    "actual_m1_bars": 30000,
+    "cost_bps_per_side": 400.0
+  },
+  {
+    "symbol": "SOLUSDT",
+    "bars_processed": 30000,
+    "total_trades": 4,
+    "win_rate": 0.5,
+    "profit_factor": 3.1824554768016187,
+    "net_r": 5.035707145957705,
+    "expectancy_r": 1.2589267864894262,
+    "max_drawdown_r": 2.307358477405238,
+    "max_daily_drawdown_pct": 2.4656630912576105,
+    "max_total_drawdown_pct": 2.4656630912576105,
+    "trades_by_regime": {
+      "IMBALANCE_BEAR": {
+        "trades": 2.0,
+        "win_rate": 1.0,
+        "net_r": 7.343065623362942,
+        "expectancy_r": 3.671532811681471,
+        "profit_factor": Infinity
+      },
+      "IMBALANCE_BULL": {
+        "trades": 2.0,
+        "win_rate": 0.0,
+        "net_r": -2.3073584774052374,
+        "expectancy_r": -1.1536792387026187,
+        "profit_factor": 0.0
+      }
+    },
+    "trades_by_poi_type": {
+      "LONG_TREND_PULLBACK": {
+        "trades": 2.0,
+        "win_rate": 0.0,
+        "net_r": -2.3073584774052374,
+        "expectancy_r": -1.1536792387026187,
+        "profit_factor": 0.0
+      },
+      "SHORT_TREND_PULLBACK": {
+        "trades": 2.0,
+        "win_rate": 1.0,
+        "net_r": 7.343065623362942,
+        "expectancy_r": 3.671532811681471,
+        "profit_factor": Infinity
+      }
+    },
+    "trade_outcomes": {
+      "full_sl_hits": 2,
+      "tp1_then_be_hits": 1,
+      "full_tp2_hits": 1
+    },
+    "spread_points": 4.1160000000000005,
+    "point_size": 0.01,
+    "funnel_counts": {
+      "sessions_evaluated": 20,
+      "bars_with_active_poi": 403,
+      "bars_touched_poi": 214,
+      "passed_zscore": 22,
+      "passed_volume": 10,
+      "passed_rejection": 8,
+      "rejected_low_rr": 1,
+      "rejected_session_hours": 372,
+      "rejected_low_volume_day": 768,
+      "rejected_high_spread_to_sl": 6,
+      "trades_opened": 4
+    },
+    "instrument_profile": "CRYPTO_MOMENTUM",
+    "risk_per_trade_pct": 1.0,
+    "trigger_tf": "M15",
+    "data_source": "binance_usdm_futures",
+    "requested_m1_bars": 30000,
+    "actual_m1_bars": 30000,
+    "cost_bps_per_side": 400.0
+  },
+  {
+    "symbol": "LINKUSDT",
+    "bars_processed": 30000,
+    "total_trades": 4,
+    "win_rate": 0.25,
+    "profit_factor": 0.6003528811813446,
+    "net_r": -1.2976498572117983,
+    "expectancy_r": -0.32441246430294957,
+    "max_drawdown_r": 3.2469891464440215,
+    "max_daily_drawdown_pct": 1.1474709123376527,
+    "max_total_drawdown_pct": 3.2745994110624537,
+    "trades_by_regime": {
+      "IMBALANCE_BEAR": {
+        "trades": 2.0,
+        "win_rate": 0.0,
+        "net_r": -2.191131069908554,
+        "expectancy_r": -1.095565534954277,
+        "profit_factor": 0.0
+      },
+      "IMBALANCE_BULL": {
+        "trades": 2.0,
+        "win_rate": 0.5,
+        "net_r": 0.893481212696756,
+        "expectancy_r": 0.446740606348378,
+        "profit_factor": 1.8462133619591092
+      }
+    },
+    "trades_by_poi_type": {
+      "LONG_TREND_PULLBACK": {
+        "trades": 2.0,
+        "win_rate": 0.5,
+        "net_r": 0.893481212696756,
+        "expectancy_r": 0.446740606348378,
+        "profit_factor": 1.8462133619591092
+      },
+      "SHORT_TREND_PULLBACK": {
+        "trades": 2.0,
+        "win_rate": 0.0,
+        "net_r": -2.191131069908554,
+        "expectancy_r": -1.095565534954277,
+        "profit_factor": 0.0
+      }
+    },
+    "trade_outcomes": {
+      "full_sl_hits": 3,
+      "tp1_then_be_hits": 0,
+      "full_tp2_hits": 1
+    },
+    "spread_points": 0.48828000000000005,
+    "point_size": 0.01,
+    "funnel_counts": {
+      "sessions_evaluated": 20,
+      "bars_with_active_poi": 1051,
+      "bars_touched_poi": 567,
+      "passed_zscore": 61,
+      "passed_volume": 21,
+      "passed_rejection": 14,
+      "rejected_low_rr": 0,
+      "rejected_session_hours": 1126,
+      "rejected_low_volume_day": 2304,
+      "rejected_high_spread_to_sl": 4,
+      "trades_opened": 4
+    },
+    "instrument_profile": "CRYPTO_MOMENTUM",
+    "risk_per_trade_pct": 1.0,
+    "trigger_tf": "M5",
+    "data_source": "binance_usdm_futures",
+    "requested_m1_bars": 30000,
+    "actual_m1_bars": 30000,
+    "cost_bps_per_side": 400.0
+  },
+  {
+    "symbol": "LINKUSDT",
+    "bars_processed": 30000,
+    "total_trades": 1,
+    "win_rate": 1.0,
+    "profit_factor": Infinity,
+    "net_r": 1.8547321766989473,
+    "expectancy_r": 1.8547321766989473,
+    "max_drawdown_r": 0.0,
+    "max_daily_drawdown_pct": 0.0,
+    "max_total_drawdown_pct": 0.0,
+    "trades_by_regime": {
+      "IMBALANCE_BEAR": {
+        "trades": 1.0,
+        "win_rate": 1.0,
+        "net_r": 1.8547321766989473,
+        "expectancy_r": 1.8547321766989473,
+        "profit_factor": Infinity
+      }
+    },
+    "trades_by_poi_type": {
+      "SHORT_TREND_PULLBACK": {
+        "trades": 1.0,
+        "win_rate": 1.0,
+        "net_r": 1.8547321766989473,
+        "expectancy_r": 1.8547321766989473,
+        "profit_factor": Infinity
+      }
+    },
+    "trade_outcomes": {
+      "full_sl_hits": 0,
+      "tp1_then_be_hits": 0,
+      "full_tp2_hits": 1
+    },
+    "spread_points": 0.48828000000000005,
+    "point_size": 0.01,
+    "funnel_counts": {
+      "sessions_evaluated": 20,
+      "bars_with_active_poi": 347,
+      "bars_touched_poi": 216,
+      "passed_zscore": 16,
+      "passed_volume": 5,
+      "passed_rejection": 5,
+      "rejected_low_rr": 1,
+      "rejected_session_hours": 364,
+      "rejected_low_volume_day": 768,
+      "rejected_high_spread_to_sl": 1,
+      "trades_opened": 1
+    },
+    "instrument_profile": "CRYPTO_MOMENTUM",
+    "risk_per_trade_pct": 1.0,
+    "trigger_tf": "M15",
+    "data_source": "binance_usdm_futures",
+    "requested_m1_bars": 30000,
+    "actual_m1_bars": 30000,
+    "cost_bps_per_side": 400.0
+  }
+]

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import csv
 import io
 import json
+import sys
 import time
 import zipfile
 from pathlib import Path
@@ -189,19 +190,37 @@ class BinanceDataClient:
         current_month = now.normalize().replace(day=1)
         frames: list[pd.DataFrame] = []
 
-        def fetch_archive(url: str) -> pd.DataFrame:
-            request = Request(url, headers={"User-Agent": "Pragma/1.0"})
-            with self._opener(request, timeout=max(self.timeout, 30.0)) as response:
-                payload = response.read()
-            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-                csv_names = [name for name in archive.namelist() if name.lower().endswith(".csv")]
-                if not csv_names:
-                    return pd.DataFrame()
-                with archive.open(csv_names[0]) as stream:
-                    rows = list(csv.reader(io.TextIOWrapper(stream, encoding="utf-8")))
-            if rows and rows[0] and rows[0][0].strip().lower() in {"open_time", "open time"}:
-                rows = rows[1:]
-            return _parse_rows(rows)
+        def fetch_archive(url: str, max_retries: int = 3) -> pd.DataFrame:
+            for attempt in range(max_retries):
+                try:
+                    request = Request(url, headers={"User-Agent": "Pragma/1.0"})
+                    with self._opener(request, timeout=max(self.timeout, 30.0)) as response:
+                        payload = response.read()
+                    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                        csv_names = [name for name in archive.namelist() if name.lower().endswith(".csv")]
+                        if not csv_names:
+                            return pd.DataFrame()
+                        with archive.open(csv_names[0]) as stream:
+                            rows = list(csv.reader(io.TextIOWrapper(stream, encoding="utf-8")))
+                    if rows and rows[0] and rows[0][0].strip().lower() in {"open_time", "open time"}:
+                        rows = rows[1:]
+                    return _parse_rows(rows)
+                except HTTPError as exc:
+                    if exc.code == 404:
+                        return pd.DataFrame()
+                    if attempt < max_retries - 1:
+                        time.sleep(1.0 * (attempt + 1))
+                        continue
+                    raise
+                except (URLError, TimeoutError, OSError):
+                    if attempt < max_retries - 1:
+                        time.sleep(1.0 * (attempt + 1))
+                        continue
+                    raise
+            return pd.DataFrame()
+
+        sys.stderr.write(f"[BINANCE-ARCHIVE] Fetching {symbol} {timeframe} ({count} bars) from data.binance.vision...\n")
+        sys.stderr.flush()
 
         # Binance publishes completed months as monthly archives. The current
         # month is fetched day-by-day because its monthly archive is not final.
@@ -246,6 +265,11 @@ class BinanceDataClient:
             )
         result = result.tail(count).copy()
         result.attrs["source"] = "binance_usdm_futures_archive"
+        if not self.no_cache:
+            cache_path = self.cache_dir / self._cache_key(symbol, timeframe)
+            self._write_cache(cache_path, result)
+        sys.stderr.write(f"[BINANCE-ARCHIVE] Completed {symbol} {timeframe}: {len(result)} closed bars.\n")
+        sys.stderr.flush()
         return result
 
     def rates(self, symbol: str, timeframe: str = "M1", count: int = 1500) -> pd.DataFrame:
@@ -314,6 +338,10 @@ class BinanceDataClient:
 
 
         except BinanceDataError as exc:
+            if not cached.empty and len(filter_closed_bars(cached, tf)) >= count:
+                result = filter_closed_bars(cached, tf).tail(count).copy()
+                result.attrs["source"] = "binance_cache"
+                return result
             if self.futures_only and "HTTP Error 451" in str(exc):
                 return self._rates_from_vision_archive(symbol, interval, count, tf)
             raise

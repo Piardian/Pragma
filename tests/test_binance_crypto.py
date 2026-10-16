@@ -86,7 +86,8 @@ class BinanceCryptoTests(unittest.TestCase):
                 self.assertEqual(profile.name, "CRYPTO_MOMENTUM")
                 self.assertEqual(profile.default_trigger_tf, "M15")
                 self.assertEqual(profile.active_hours_utc, (0, 24))
-                self.assertEqual(default_trigger_tf_for_symbol(symbol), "M15")
+                expected_tf = "M5" if symbol.upper().startswith(("SOL", "LINK")) else "M15"
+                self.assertEqual(default_trigger_tf_for_symbol(symbol), expected_tf)
         self.assertEqual(CRYPTO_MOMENTUM.active_hours_utc, (0, 24))
 
     def test_crypto_trigger_allows_early_utc_hours(self):

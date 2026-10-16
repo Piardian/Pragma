@@ -12,6 +12,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
 import math
+from pathlib import Path
+import sys
 from typing import Any
 
 import numpy as np
@@ -20,7 +22,7 @@ import pandas as pd
 from config.settings import DEFAULT_CRYPTO_SCAN_SYMBOLS
 from pragma.amt_engine import calculate_volume_profile
 from pragma.data.mt5_data import MT5DataClient, filter_closed_bars
-from pragma.data.binance_data import BinanceDataClient, normalize_binance_symbol
+from pragma.data.binance_data import BinanceDataClient, normalize_binance_symbol, btc_leader_allows_direction
 from pragma.macro_gate import MacroGate
 from pragma.instrument_profiles import default_trigger_tf_for_symbol, get_instrument_profile, normalize_trigger_tf, trigger_tf_minutes
 from pragma.regime_poi_engine import generate_regime_pois
@@ -254,6 +256,25 @@ def _atr14(m15_closed: pd.DataFrame) -> float | None:
     return float(value)
 
 
+def _precompute_m15_atr14(m15_closed: pd.DataFrame) -> np.ndarray:
+    """Precompute causal rolling 14-period ATR for all closed M15 bars.
+
+    Returns a numpy array of float values aligned with m15_closed.index.
+    Indices < 14 contain np.nan.
+    """
+    if len(m15_closed) < 15:
+        return np.full(len(m15_closed), np.nan, dtype=float)
+    previous_close = m15_closed["close"].shift(1)
+    true_range = pd.concat([
+        m15_closed["high"] - m15_closed["low"],
+        (m15_closed["high"] - previous_close).abs(),
+        (m15_closed["low"] - previous_close).abs(),
+    ], axis=1).max(axis=1)
+    values = true_range.rolling(14, min_periods=14).mean().to_numpy(dtype=float, copy=True)
+    values[:14] = np.nan
+    return values
+
+
 def _profile_levels(day_bars: pd.DataFrame, bins: int) -> dict[str, Any]:
     profile = calculate_volume_profile(day_bars, bins=bins)
     return {
@@ -363,6 +384,11 @@ def run_backtest(
     trigger_tf: str | None = None,
     tp1_close_pct: float = 0.50,
     be_offset_r: float | None = 0.0,
+    btc_regimes: dict[pd.Timestamp, str] | None = None,
+    out_regimes: dict[pd.Timestamp, str] | None = None,
+    session_hours_utc: tuple[int, int] | None = None,
+    filter_low_volume_days: bool = False,
+    min_daily_volume_ratio: float = 0.70,
 ) -> BacktestReport:
     """Simulate a single instrument without future-data leakage.
 
@@ -402,6 +428,9 @@ def run_backtest(
     if m1.index.to_series().diff().dropna().le(pd.Timedelta(0)).any():
         raise ValueError("M1 timestamps must be strictly increasing")
 
+    m15_atr_values = _precompute_m15_atr14(m15)
+    m15_index = m15.index
+
     m1 = m1.copy()
     m1["session"] = m1.index.strftime("%Y-%m-%d")
     session_names = list(dict.fromkeys(m1["session"].tolist()))
@@ -417,6 +446,25 @@ def run_backtest(
         prior_profiles[current_name] = _profile_levels(
             m1.loc[m1["session"] == previous_name], profile_bins
         )
+
+    low_volume_sessions: dict[str, bool] = {}
+    if filter_low_volume_days:
+        session_vols = {s: float(m1.loc[m1["session"] == s, "tick_volume"].sum()) for s in session_names}
+        for pos in range(len(session_names)):
+            curr_name = session_names[pos]
+            try:
+                curr_dt = pd.Timestamp(curr_name)
+                is_weekend = curr_dt.dayofweek >= 5
+            except Exception:
+                is_weekend = False
+            past_vols = [session_vols[session_names[p]] for p in range(max(0, pos - 5), pos)]
+            if past_vols:
+                avg_vol = float(np.mean(past_vols))
+                prior_vol = past_vols[-1]
+                is_low_vol = prior_vol < (float(min_daily_volume_ratio) * avg_vol)
+            else:
+                is_low_vol = False
+            low_volume_sessions[curr_name] = is_weekend or is_low_vol
 
     vwap_engine = VWAPEngine()
     # Vectorized cumulative VWAP is causal: each row depends only on that
@@ -437,6 +485,7 @@ def run_backtest(
         "passed_rejection": 0,
         "rejected_low_rr": 0,
         "rejected_session_hours": 0,
+        "rejected_low_volume_day": 0,
         "rejected_high_spread_to_sl": 0,
         "trades_opened": 0,
     }
@@ -466,6 +515,9 @@ def run_backtest(
         # Keep diagnostics running while a trade is open, but block new entries.
         can_enter = position is None
         current_session = str(bar["session"])
+        if filter_low_volume_days and low_volume_sessions.get(current_session, False):
+            funnel_counts["rejected_low_volume_day"] += 1
+            continue
         profile = prior_profiles.get(current_session)
         if profile is None:
             continue
@@ -477,9 +529,11 @@ def run_backtest(
 
         # A M15 candle is eligible only after its entire 15-minute interval ends.
         eligible_cutoff = decision_time - pd.Timedelta(minutes=15)
-        eligible_m15 = m15.iloc[:m15.index.searchsorted(eligible_cutoff, side="right")]
-        atr = _atr14(eligible_m15)
-        if atr is None or i < 29:
+        m15_pos = m15_index.searchsorted(eligible_cutoff, side="right") - 1
+        if m15_pos < 14 or i < 29:
+            continue
+        atr = float(m15_atr_values[m15_pos])
+        if pd.isna(atr) or not np.isfinite(atr) or atr <= 0:
             continue
         price = float(bar["close"])
         regime_decision = generate_regime_pois(
@@ -491,6 +545,8 @@ def run_backtest(
             imbalance_vwap_poc_atr=instrument_profile.imbalance_vwap_poc_atr,
             mean_reversion_confluence_atr=instrument_profile.mean_reversion_confluence_atr,
         )
+        if out_regimes is not None:
+            out_regimes[timestamp] = regime_decision.regime.value
         if regime_decision.pois:
             funnel_counts["bars_with_active_poi"] += 1
         bar_touched = bar_z = bar_volume = bar_rejection = bar_low_rr = False
@@ -502,6 +558,7 @@ def run_backtest(
                 poi_type=poi.poi_type, center_price=poi.center, cost_price=cost,
                 sl_atr_buffer=instrument_profile.sl_atr_buffer,
                 min_spread_to_sl_ratio=instrument_profile.min_spread_to_sl_ratio,
+                session_hours_utc=session_hours_utc,
             )
             metrics = decision.metrics
             if metrics.get("poi_touched"):
@@ -529,6 +586,10 @@ def run_backtest(
         for poi, decision in decisions:
             if not decision.execute:
                 continue
+            if btc_regimes is not None and symbol != "BTCUSDT":
+                btc_reg = btc_regimes.get(timestamp)
+                if btc_reg and not btc_leader_allows_direction(btc_reg, symbol, poi.direction):
+                    continue
             entry = _adverse_price(float(bar["close"]), poi.direction, True, cost)
             stop = float(decision.stop_loss)
             risk = abs(entry - stop)
@@ -656,44 +717,89 @@ def main(argv: list[str] | None = None) -> int:
                         help="Override the instrument profile and enable BALANCE mean-reversion POIs")
     parser.add_argument("--disable-trend-pullback", action="store_true",
                         help="Override the instrument profile and disable trend-pullback POIs")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Optional file path to write JSON results to")
+    parser.add_argument("--symbols", nargs="+", default=None,
+                        help="Specific crypto symbols to scan (e.g. BTCUSDT SOLUSDT LINKUSDT)")
+    parser.add_argument("--session-hours", nargs=2, type=int, default=None, metavar=("START", "END"),
+                        help="Active trading UTC hours [start, end), e.g. 13 21 for NY session")
+    parser.add_argument("--ny-session-only", action="store_true",
+                        help="Restrict trading to New York session hours (13:00 to 21:00 UTC)")
+    parser.add_argument("--filter-low-volume-days", action="store_true",
+                        help="Skip trading on low volume days and weekends")
+    parser.add_argument("--min-daily-volume-ratio", type=float, default=0.70,
+                        help="Minimum volume ratio relative to 5-day rolling average (default: 0.70)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Use deterministic synthetic M1 data instead of MT5")
     args = parser.parse_args(argv)
+    session_hours = (13, 21) if args.ny_session_only else (tuple(args.session_hours) if args.session_hours else None)
     if args.macro_bias is not None and args.macro_bias != "auto":
         args.macro_bias = int(args.macro_bias)
     if args.auto_direction:
         args.macro_bias = "auto"
     if args.scan_crypto:
-        symbols = tuple(args.crypto_symbols) if args.crypto_symbols else DEFAULT_CRYPTO_SCAN_SYMBOLS
+        symbols_arg = args.crypto_symbols or args.symbols
+        symbols = tuple(normalize_binance_symbol(s) for s in symbols_arg) if symbols_arg else DEFAULT_CRYPTO_SCAN_SYMBOLS
         timeframes = (args.trigger_tf,) if args.trigger_tf else ("M5", "M15")
         results = []
-        for crypto_symbol in symbols:
+        btc_regimes: dict[pd.Timestamp, str] = {}
+        total_symbols = len(symbols)
+        for s_idx, crypto_symbol in enumerate(symbols, 1):
+            sys.stderr.write(f"\n[PHASE12-MATRIX] [{s_idx}/{total_symbols}] Processing symbol {crypto_symbol}...\n")
+            sys.stderr.flush()
             try:
                 client = BinanceDataClient(no_cache=args.no_cache, futures_only=True)
-                m1 = client.rates(crypto_symbol, "M1", max(100000, args.bars))
-                if len(m1) < 100000:
-                    raise ValueError(f"Insufficient M1 history: {len(m1)} bars; at least 100000 required")
-                m15 = client.rates(crypto_symbol, "M15", max(300, len(m1) // 15 + 50))
+                m1 = client.rates(crypto_symbol, "M1", args.bars)
+                if len(m1) < min(300, args.bars):
+                    raise ValueError(f"Insufficient M1 history: {len(m1)} bars; at least {min(300, args.bars)} required")
+                m15 = _resample_m15(m1)
                 m1.attrs["source"] = "binance"
                 m15.attrs["source"] = "binance"
                 bias = args.macro_bias if args.macro_bias is not None else "auto"
                 crypto_point = args.point_size if args.point_size is not None else 0.01
                 effective_spread = max(args.spread_points, float(m1["close"].iloc[-1]) * 0.0004 / crypto_point)
                 for tf in timeframes:
-                    report = run_backtest(m1, symbol=crypto_symbol, macro_bias=bias, m15_bars=m15,
+                    sys.stderr.write(f"[PHASE12-MATRIX] [{s_idx}/{total_symbols}] Running {crypto_symbol} {tf} ({len(m1)} closed M1 bars)...\n")
+                    sys.stderr.flush()
+                    symbol_regimes = {} if (crypto_symbol == "BTCUSDT" and args.btc_leader_filter) else None
+                    report = run_backtest(
+                        m1, symbol=crypto_symbol, macro_bias=bias, m15_bars=m15,
                         profile_bins=args.profile_bins, spread_points=effective_spread, point_size=crypto_point,
                         allow_mean_reversion=True if args.allow_mean_reversion else None,
                         disable_trend_pullback=args.disable_trend_pullback, trigger_tf=tf,
-                        tp1_close_pct=args.tp1_close_pct, be_offset_r=None if args.no_breakeven else args.be_offset_r)
+                        tp1_close_pct=args.tp1_close_pct, be_offset_r=None if args.no_breakeven else args.be_offset_r,
+                        btc_regimes=btc_regimes if args.btc_leader_filter else None,
+                        out_regimes=symbol_regimes,
+                        session_hours_utc=session_hours,
+                        filter_low_volume_days=args.filter_low_volume_days,
+                        min_daily_volume_ratio=args.min_daily_volume_ratio,
+                    )
+                    if symbol_regimes:
+                        btc_regimes.update(symbol_regimes)
                     row = report.to_dict()
                     row["data_source"] = "binance_usdm_futures"
-                    row["requested_m1_bars"] = max(100000, args.bars)
+                    row["requested_m1_bars"] = args.bars
                     row["actual_m1_bars"] = len(m1)
                     row["cost_bps_per_side"] = round(effective_spread / float(m1["close"].iloc[-1]) * 10000, 4)
                     results.append(row)
+                    sys.stderr.write(
+                        f"[PHASE12-MATRIX] [{s_idx}/{total_symbols}] Completed {crypto_symbol} {tf}: "
+                        f"Trades={report.total_trades}, WinRate={report.win_rate:.1%}, "
+                        f"NetR={report.net_r:.2f}R, Exp={report.expectancy_r:.3f}R, MaxDD={report.max_drawdown_r:.2f}R\n"
+                    )
+                    sys.stderr.flush()
             except Exception as exc:
+                sys.stderr.write(f"[PHASE12-MATRIX] [{s_idx}/{total_symbols}] ERROR on {crypto_symbol}: {exc}\n")
+                sys.stderr.flush()
                 results.append({"symbol": crypto_symbol, "error": str(exc)})
-        print(json.dumps(results, indent=2, allow_nan=True))
+        output_json = json.dumps(results, indent=2, allow_nan=True)
+        if args.output:
+            out_path = Path(args.output)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(output_json)
+            sys.stderr.write(f"[PHASE12-MATRIX] Saved results to {args.output}\n")
+            sys.stderr.flush()
+        print(output_json)
         return 0
     source = ("binance" if str(args.symbol).upper().endswith("USDT") else "mt5") if args.source == "auto" else args.source
     symbol = normalize_binance_symbol(args.symbol) if source == "binance" else args.symbol
@@ -733,6 +839,9 @@ def main(argv: list[str] | None = None) -> int:
         disable_trend_pullback=args.disable_trend_pullback,
         trigger_tf=args.trigger_tf, tp1_close_pct=args.tp1_close_pct,
         be_offset_r=None if args.no_breakeven else args.be_offset_r,
+        session_hours_utc=session_hours,
+        filter_low_volume_days=args.filter_low_volume_days,
+        min_daily_volume_ratio=args.min_daily_volume_ratio,
     )
     _print_report(report)
     print("\nJSON:")

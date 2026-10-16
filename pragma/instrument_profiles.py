@@ -45,7 +45,11 @@ _MOMENTUM_SYMBOLS = frozenset({
 _CURRENCY_CODES = frozenset({
     "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD",
     "SEK", "NOK", "DKK", "SGD", "HKD", "CNH", "CNY", "MXN",
-    "ZAR", "TRY", "PLN", "HUF", "CZK",
+    "ZAR", "TRY", "PLN", "HUF", "CZK", "INR", "RUB", "KRW", "THB",
+    "ILS", "TWD", "BRL", "ARS", "PHP", "IDR", "MYR", "SAR", "AED",
+    "QAR", "KWD", "BHD", "OMR", "EGP", "RON", "BGN", "ISK", "CLP",
+    "COP", "PEN", "UYU", "PKR", "BDT", "VND", "NGN", "KES", "GHS",
+    "UAH",
 })
 
 
@@ -54,7 +58,7 @@ def canonical_symbol(symbol: str) -> str:
     value = str(symbol or "").strip().upper()
     # MT5 broker suffixes such as XAUUSD.a, EURUSDm, EURUSD.pro.
     value = value.replace("/", "").replace("_", "").replace("-", "").replace(" ", "")
-    for suffix in (".PRO", ".A", ".M", ".RAW", ".ECN"):
+    for suffix in (".PRO", ".A", ".M", ".RAW", ".ECN", ".R", ".I", ".CASH", ".STD", ".ZERO"):
         if value.endswith(suffix):
             value = value[:-len(suffix)]
     if value.endswith("M") and (

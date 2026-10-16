@@ -109,7 +109,7 @@ def canonical_symbol(symbol: str) -> str:
         value[:-1] in _MOMENTUM_SYMBOLS or _is_fx_cross(value[:-1])
     ):
         value = value[:-1]
-    if value.endswith(("USDT", "USDC")) and value[:-4] in {"BTC", "ETH", "SOL"}:
+    if value.endswith(("USDT", "USDC")) and value[:-4] in {"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "LINK", "SUI"}:
         value = value[:-4] + "USD"
     aliases = {"GOLD": "XAUUSD", "SILVER": "XAGUSD", "GC=F": "XAUUSD", "BTC": "BTCUSD", "ETH": "ETHUSD", "SOL": "SOLUSD", "BNB": "BNBUSD", "XRP": "XRPUSD", "DOGE": "DOGEUSD", "ADA": "ADAUSD", "AVAX": "AVAXUSD", "LINK": "LINKUSD", "SUI": "SUIUSD"}
     return aliases.get(value, value)
@@ -131,6 +131,8 @@ def get_instrument_profile(symbol: str) -> InstrumentProfile:
     defaults for backward compatibility with Pragma's prior XAUUSD behavior.
     """
     canonical = canonical_symbol(symbol)
+    if canonical in _CRYPTO_SYMBOLS:
+        return CRYPTO_MOMENTUM
     if canonical in _MOMENTUM_SYMBOLS:
         return MOMENTUM_TREND
     if _is_fx_cross(canonical):
@@ -141,6 +143,6 @@ def get_instrument_profile(symbol: str) -> InstrumentProfile:
 
 def default_trigger_tf_for_symbol(symbol: str) -> str:
     """Choose a symbol-aware default while preserving the shared momentum profile."""
-    if canonical_symbol(symbol) in {"BTCUSD", "ETHUSD", "SOLUSD"}:
+    if canonical_symbol(symbol) in _CRYPTO_SYMBOLS:
         return "M15"
     return get_instrument_profile(symbol).default_trigger_tf

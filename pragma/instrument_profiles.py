@@ -146,8 +146,8 @@ def default_trigger_tf_for_symbol(symbol: str) -> str:
     canonical = canonical_symbol(symbol)
     crypto_trigger_tfs = {
         "BTCUSD": "M15",
-        "SOLUSD": "M5",
-        "LINKUSD": "M5",
+        "SOLUSD": "M15",
+        "LINKUSD": "M15",
     }
     if canonical in crypto_trigger_tfs:
         return crypto_trigger_tfs[canonical]

@@ -60,7 +60,7 @@ class InstrumentProfileTests(unittest.TestCase):
                 self.assertEqual(default_trigger_tf_for_symbol(symbol), "M15")
         for symbol in ("SOLUSDT", "SOL", "SOLUSD", "LINKUSDT", "LINK", "LINKUSD"):
             with self.subTest(symbol=symbol):
-                self.assertEqual(default_trigger_tf_for_symbol(symbol), "M5")
+                self.assertEqual(default_trigger_tf_for_symbol(symbol), "M15")
 
     def test_profile_parameters_control_poi_radius_and_trend_permission(self):
         previous = {"pdPOC": 100.0, "pdVAH": 102.0, "pdVAL": 98.0, "pdLVN": []}

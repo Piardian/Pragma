@@ -162,8 +162,8 @@ def evaluate_trigger(
         wick_ratio = (float(min(last["open"], last["close"]) - last["low"]) / candle_range
                       if candle_range > 0 else 0.0)
         rejection = bool(last["close"] > last["open"] or wick_ratio >= 0.40)
-        if confirm_binance_delta and source_is_binance and last_delta is not None:
-            delta_ok = last_delta > 0 or wick_ratio >= 0.60
+        if confirm_binance_delta and source_is_binance:
+            delta_ok = bool(last_delta is not None and last_delta > 0)
             rejection = rejection and delta_ok
         stop_loss = poi_low - float(sl_atr_buffer) * atr
         z_rule = f"Z<=-{abs(z_extreme):g} in last 5; current Z rises and >=-{abs(z_recovery):g}"

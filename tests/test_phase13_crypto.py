@@ -291,11 +291,143 @@ class TestPhase13Crypto(unittest.TestCase):
         self.assertFalse(decision_late.metrics["session_allowed"])
         self.assertEqual(decision_late.metrics["session_hour_utc"], 23)
 
+    def test_crypto_long_requires_btc_bull(self):
+        """Altcoin long POIs must be vetoed unless BTC regime is IMBALANCE_BULL."""
+        profile = {"pdPOC": 100.0, "pdVAH": 105.0, "pdVAL": 95.0, "pdLVN": []}
+        vwap = {
+            "vwap": 108.0,
+            "vwap_sigma": 2.0,
+            "vwap_lower_1p0sigma": 106.0,
+            "vwap_upper_1p0sigma": 110.0,
+            "vwap_lower_1p5sigma": 105.0,
+            "vwap_upper_1p5sigma": 111.0,
+            "vwap_lower_2p0sigma": 104.0,
+            "vwap_upper_2p0sigma": 112.0,
+            "vwap_lower_2p5sigma": 103.0,
+            "vwap_upper_2p5sigma": 113.0,
+        }
+        current_price = 106.0
+        atr = 2.0
+
+        # Case 1: BTC regime is IMBALANCE_BEAR -> VETO
+        dec_bear = generate_regime_pois(
+            macro_bias=1, previous_profile=profile, vwap=vwap, current_price=current_price,
+            atr_14=atr, is_crypto=True, is_btc=False, btc_leader_filter=True,
+            btc_leader_regime="IMBALANCE_BEAR",
+        )
+        self.assertEqual(len(dec_bear.pois), 0)
+
+        # Case 2: BTC regime is BALANCE -> VETO
+        dec_bal = generate_regime_pois(
+            macro_bias=1, previous_profile=profile, vwap=vwap, current_price=current_price,
+            atr_14=atr, is_crypto=True, is_btc=False, btc_leader_filter=True,
+            btc_leader_regime="BALANCE",
+        )
+        self.assertEqual(len(dec_bal.pois), 0)
+
+        # Case 3: BTC regime is IMBALANCE_BULL -> ALLOWED
+        dec_bull = generate_regime_pois(
+            macro_bias=1, previous_profile=profile, vwap=vwap, current_price=current_price,
+            atr_14=atr, is_crypto=True, is_btc=False, btc_leader_filter=True,
+            btc_leader_regime="IMBALANCE_BULL",
+        )
+        self.assertGreaterEqual(len(dec_bull.pois), 1)
+        self.assertTrue(all(poi.direction == "LONG" for poi in dec_bull.pois))
+
+    def test_crypto_long_requires_vwap_separation(self):
+        """Crypto long trend pullback requires VWAP >= pdPOC + 0.35 * ATR."""
+        atr = 2.0
+        poc = 100.0
+        vah = 101.0
+        val = 95.0
+        profile = {"pdPOC": poc, "pdVAH": vah, "pdVAL": val, "pdLVN": []}
+
+        # Separation required: 0.35 * 2.0 = 0.70 -> min vwap = 100.70
+        # Case A: vwap = 100.50 (separation = 0.50 < 0.70) -> VETO
+        vwap_insufficient = {
+            "vwap": 100.50,
+            "vwap_sigma": 1.0,
+            "vwap_lower_1p0sigma": 99.50,
+            "vwap_upper_1p0sigma": 101.50,
+            "vwap_lower_1p5sigma": 99.0,
+            "vwap_upper_1p5sigma": 102.0,
+            "vwap_lower_2p0sigma": 98.50,
+            "vwap_upper_2p0sigma": 102.50,
+            "vwap_lower_2p5sigma": 98.0,
+            "vwap_upper_2p5sigma": 103.0,
+        }
+        dec_a = generate_regime_pois(
+            macro_bias=1, previous_profile=profile, vwap=vwap_insufficient,
+            current_price=106.0, atr_14=atr, is_crypto=True, is_btc=True,
+        )
+        self.assertEqual(len(dec_a.pois), 0)
+
+        # Case B: vwap = 100.80 (separation = 0.80 >= 0.70) -> ALLOWED
+        vwap_sufficient = {
+            "vwap": 100.80,
+            "vwap_sigma": 1.0,
+            "vwap_lower_1p0sigma": 99.80,
+            "vwap_upper_1p0sigma": 101.80,
+            "vwap_lower_1p5sigma": 99.30,
+            "vwap_upper_1p5sigma": 102.30,
+            "vwap_lower_2p0sigma": 98.80,
+            "vwap_upper_2p0sigma": 102.80,
+            "vwap_lower_2p5sigma": 98.30,
+            "vwap_upper_2p5sigma": 103.30,
+        }
+        dec_b = generate_regime_pois(
+            macro_bias=1, previous_profile=profile, vwap=vwap_sufficient,
+            current_price=106.0, atr_14=atr, is_crypto=True, is_btc=True,
+        )
+        self.assertGreaterEqual(len(dec_b.pois), 1)
+
+    def test_crypto_long_rejects_negative_delta(self):
+        """Long trigger must strictly reject negative or zero volume delta."""
+        idx = pd.date_range("2026-05-01 10:00:00", periods=30, freq="min", tz="UTC")
+        close = 100.0 + 0.1 * np.arange(30)
+        open_ = close - 0.1
+        high = close + 0.05
+        low = open_ - 0.05
+        vol = np.full(30, 100.0)
+
+        # Trigger bar has negative volume_delta (-10.0), even with high wick
+        delta_neg = np.full(30, 5.0)
+        delta_neg[-1] = -10.0
+
+        bars_neg = pd.DataFrame({
+            "open": open_, "high": high, "low": low, "close": close,
+            "tick_volume": vol, "volume_delta": delta_neg,
+        }, index=idx)
+        bars_neg.attrs["source"] = "binance"
+
+        decision_neg = evaluate_trigger(
+            bars_neg, "LONG", poi_low=102.5, poi_high=103.5, atr_14=1.0,
+            take_profit=106.0, confirm_binance_delta=True,
+        )
+        self.assertFalse(decision_neg.execute)
+        self.assertFalse(decision_neg.metrics["binance_delta_confirmation"])
+
+        # Trigger bar has strictly positive volume_delta (+10.0)
+        delta_pos = np.full(30, 5.0)
+        delta_pos[-1] = 10.0
+        bars_pos = pd.DataFrame({
+            "open": open_, "high": high, "low": low, "close": close,
+            "tick_volume": vol, "volume_delta": delta_pos,
+        }, index=idx)
+        bars_pos.attrs["source"] = "binance"
+
+        decision_pos = evaluate_trigger(
+            bars_pos, "LONG", poi_low=102.5, poi_high=103.5, atr_14=1.0,
+            take_profit=106.0, confirm_binance_delta=True,
+        )
+        self.assertTrue(decision_pos.metrics.get("binance_delta_confirmation", False))
+
     def test_crypto_low_volume_day_filter_default(self):
         """CRYPTO_MOMENTUM profile must enable low volume / weekend filter by default."""
         profile = get_instrument_profile("BTCUSDT")
         self.assertEqual(profile.name, "CRYPTO_MOMENTUM")
         self.assertEqual(profile.active_hours_utc, (8, 22))
+        self.assertEqual(profile.default_trigger_tf, "M15")
 
 
 if __name__ == "__main__":

@@ -175,9 +175,10 @@ def generate_regime_pois(
     if auto_direction:
         # Strict, causal internal crypto regime: direction is assigned only when
         # both price and VWAP clear the prior-session value-area/POC thresholds.
-        if price > vah and vwap_value >= poc + (0.15 * atr):
+        auto_sep = (0.35 if is_crypto else 0.15) * atr
+        if price > vah and vwap_value >= poc + auto_sep:
             macro_bias = 1
-        elif price < val and vwap_value <= poc - (0.15 * atr):
+        elif price < val and vwap_value <= poc - auto_sep:
             macro_bias = -1
         else:
             macro_bias = 0
@@ -236,10 +237,18 @@ def generate_regime_pois(
                 add("LONG", "LONG_MEAN_REVERSION", val,
                     (lower_1, vwap_value, poc, upper_1, vah),
                     ("pdVAL", "direct_level_touch", "vwap_midpoint"))
-    bull_imbalance_quality = vwap_value >= poc + (float(imbalance_vwap_poc_atr) * atr)
+    bull_imbalance_sep = 0.35 if is_crypto else float(imbalance_vwap_poc_atr)
+    bull_imbalance_quality = vwap_value >= poc + (bull_imbalance_sep * atr)
     bear_imbalance_sep = 0.35 if is_crypto else float(imbalance_vwap_poc_atr)
     bear_imbalance_quality = vwap_value <= poc - (bear_imbalance_sep * atr)
-    if allow_trend_pullback and macro_bias == 1 and regime == MarketRegime.IMBALANCE_BULL and bull_imbalance_quality:
+
+    crypto_long_veto = False
+    if is_crypto and not is_btc and btc_leader_filter:
+        btc_reg = str(btc_leader_regime or "").upper() if btc_leader_regime is not None else None
+        if btc_reg != "IMBALANCE_BULL":
+            crypto_long_veto = True
+
+    if allow_trend_pullback and macro_bias == 1 and regime == MarketRegime.IMBALANCE_BULL and bull_imbalance_quality and not crypto_long_veto:
         for name, level in (("lower_1p0sigma", lower_1), ("vwap", vwap_value)):
             match = _pair_if_confluent("pdVAH", vah, name, level, tolerance)
             if match:

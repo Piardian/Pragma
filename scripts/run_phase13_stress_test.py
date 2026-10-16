@@ -155,9 +155,9 @@ def run_phase13_suite() -> dict[str, Any]:
 
     # 1. Run 15 stress test combinations
     for period_name, (start_idx, end_idx) in periods.items():
-        print(f"\n==========================================")
-        print(f"RUNNING: {period_name} (bars {start_idx} to {end_idx})")
-        print(f"==========================================")
+        print(f"\n==========================================", flush=True)
+        print(f"RUNNING: {period_name} (bars {start_idx} to {end_idx})", flush=True)
+        print(f"==========================================", flush=True)
 
         p_bars = {s: df.iloc[start_idx:end_idx].copy() for s, df in bars_data.items()}
         for s, df in p_bars.items():
@@ -166,7 +166,7 @@ def run_phase13_suite() -> dict[str, Any]:
         # Generate BTC regimes first
         btc_m1 = p_bars["BTCUSDT"]
         btc_regimes: dict[pd.Timestamp, str] = {}
-        print(f"  Computing BTC regimes for {period_name}...")
+        print(f"  Computing BTC regimes for {period_name}...", flush=True)
         btc_report = run_backtest(
             btc_m1, symbol="BTCUSDT", macro_bias="auto",
             trigger_tf="M15", cost_pct=0.0004, apply_funding=True,
@@ -174,7 +174,7 @@ def run_phase13_suite() -> dict[str, Any]:
         )
 
         for symbol, tf in test_combos:
-            print(f"  Running {symbol} {tf} on {period_name}...")
+            print(f"  Running {symbol} {tf} on {period_name}...", flush=True)
             m1 = p_bars[symbol]
             report = run_backtest(
                 m1,
@@ -203,13 +203,14 @@ def run_phase13_suite() -> dict[str, Any]:
             print(
                 f"    -> Trades: {row['total_trades']} | Net R: {row['net_r']:+.2f}R | "
                 f"PF: {row['profit_factor']:.3f} | WinRate: {row['win_rate']:.1%} | MaxDD: {row['max_drawdown_r']:.2f}R | "
-                f"t-stat: {row['t_stat']:.2f} | Funding: {row['funding_cost_r']:.3f}R ({row['funding_events']} events)"
+                f"t-stat: {row['t_stat']:.2f} | Funding: {row['funding_cost_r']:.3f}R ({row['funding_events']} events)",
+                flush=True,
             )
 
     # 2. Run Baseline (FAZ 12) vs FAZ 13 Comparison on 300k Combined
-    print("\n==========================================")
-    print("RUNNING BASELINE COMPARISON (FAZ 12 vs FAZ 13 on Combined 300k)")
-    print("==========================================")
+    print("\n==========================================", flush=True)
+    print("RUNNING BASELINE COMPARISON (FAZ 12 vs FAZ 13 on Combined 300k)", flush=True)
+    print("==========================================", flush=True)
     full_bars = {s: df.iloc[:300000].copy() for s, df in bars_data.items()}
     for s, df in full_bars.items():
         df.attrs["source"] = "binance"
@@ -268,7 +269,8 @@ def run_phase13_suite() -> dict[str, Any]:
         print(
             f"  {symbol} {tf}: FAZ 12 Net R = {cmp_row['faz12_net_r']:+.2f}R ({cmp_row['faz12_trades']} trades, PF {cmp_row['faz12_pf']}) -> "
             f"FAZ 13 Net R = {cmp_row['faz13_net_r']:+.2f}R ({cmp_row['faz13_trades']} trades, PF {cmp_row['faz13_pf']}) | "
-            f"Delta: {cmp_row['delta_net_r']:+.2f}R | Decision: {decision}"
+            f"Delta: {cmp_row['delta_net_r']:+.2f}R | Decision: {decision}",
+            flush=True,
         )
 
     # 3. Export to JSON, CSV, and MD

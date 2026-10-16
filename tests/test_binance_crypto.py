@@ -86,7 +86,7 @@ class BinanceCryptoTests(unittest.TestCase):
                 self.assertEqual(profile.name, "CRYPTO_MOMENTUM")
                 self.assertEqual(profile.default_trigger_tf, "M15")
                 self.assertEqual(profile.active_hours_utc, (8, 22))
-                expected_tf = "M5" if symbol.upper().startswith(("SOL", "LINK")) else "M15"
+                expected_tf = "M15"
                 self.assertEqual(default_trigger_tf_for_symbol(symbol), expected_tf)
         self.assertEqual(CRYPTO_MOMENTUM.active_hours_utc, (8, 22))
 
@@ -121,11 +121,16 @@ class BinanceCryptoTests(unittest.TestCase):
         self.assertTrue(allows("IMBALANCE_BEAR", "ETHUSDT", "SHORT"))
         self.assertFalse(allows("IMBALANCE_BULL", "SOLUSDT", "SHORT"))
         self.assertTrue(allows("IMBALANCE_BULL", "SOLUSDT", "LONG"))
-        # FAZ 13.2 A.1: Altcoin shorts strictly require IMBALANCE_BEAR; BALANCE must be vetoed
+        # FAZ 13.6: Strict symmetry - Altcoin longs require IMBALANCE_BULL; BALANCE/RANGE must be vetoed
+        self.assertFalse(allows("BALANCE", "SOLUSDT", "LONG"))
+        self.assertFalse(allows("RANGE", "SOLUSDT", "LONG"))
+        self.assertFalse(allows(None, "SOLUSDT", "LONG"))
+        # Altcoin shorts require IMBALANCE_BEAR; BALANCE/RANGE must be vetoed
         self.assertFalse(allows("BALANCE", "SOLUSDT", "SHORT"))
         self.assertFalse(allows("RANGE", "SOLUSDT", "SHORT"))
         self.assertFalse(allows(None, "SOLUSDT", "SHORT"))
         self.assertTrue(allows("IMBALANCE_BEAR", "BTCUSDT", "LONG"))
+        self.assertTrue(allows("IMBALANCE_BULL", "BTCUSDT", "SHORT"))
 
     def test_partial_cache_backfill_and_exact_count(self):
         # 20 bars available at 1m intervals

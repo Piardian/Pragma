@@ -37,7 +37,7 @@ class BinanceDataError(RuntimeError):
 
 
 def btc_leader_allows_direction(btc_regime: str | None, symbol: str, direction: str) -> bool:
-    """Return False for counter-BTC altcoin directions, and require IMBALANCE_BEAR for altcoin shorts."""
+    """Return False for counter-BTC altcoin directions, requiring strict IMBALANCE regimes for altcoin trades."""
     pair = normalize_binance_symbol(symbol)
     side = str(direction or "").upper()
     if pair == "BTCUSDT":
@@ -46,7 +46,7 @@ def btc_leader_allows_direction(btc_regime: str | None, symbol: str, direction: 
         return False
     regime = str(btc_regime).upper()
     if side == "LONG":
-        return regime != "IMBALANCE_BEAR"
+        return regime == "IMBALANCE_BULL"
     if side == "SHORT":
         return regime == "IMBALANCE_BEAR"
     return False

@@ -17,7 +17,8 @@ import numpy as np
 import pandas as pd
 
 from pragma.amt_engine import AMTEngine, calculate_session_profiles
-from pragma.data.mt5_data import MT5DataClient, filter_closed_bars\nfrom pragma.data.binance_data import BinanceDataClient, normalize_binance_symbol, btc_leader_allows_direction
+from pragma.data.mt5_data import MT5DataClient, filter_closed_bars
+from pragma.data.binance_data import BinanceDataClient, normalize_binance_symbol, btc_leader_allows_direction
 from pragma.execution_notifier import ExecutionNotifier
 from pragma.macro_gate import MacroGate, refresh_begonya_gate
 from pragma.instrument_profiles import canonical_symbol, default_trigger_tf_for_symbol, get_instrument_profile, normalize_trigger_tf, trigger_tf_minutes
@@ -378,7 +379,8 @@ def _scan_begonya_once(args: argparse.Namespace, notifier: Any | None = None) ->
                 "result": None,
             }
         results.append(row)
-    print("\nBEGONYA ACTIVE SYMBOL SCAN")
+    print("
+BEGONYA ACTIVE SYMBOL SCAN")
     print(f"{'SYMBOL':<14} {'BIAS':<6} {'PROFILE':<20} {'TF':<5} {'REGIME':<18} {'POI':>4}  STATUS")
     for row in results:
         bias_label = "LONG" if row["bias"] > 0 else "SHORT"
@@ -464,7 +466,8 @@ def _watch(args: argparse.Namespace) -> int:
                                 }
                         elif symbol in last_scan_rows:
                             last_scan_rows[symbol]["bias"] = bias
-                    print("\nBEGONYA WATCH SCAN")
+                    print("
+BEGONYA WATCH SCAN")
                     print(f"{'SYMBOL':<14} {'BIAS':<6} {'PROFILE':<20} {'TF':<5} {'REGIME':<18} {'POI':>4}  STATUS")
                     for symbol, _bias in active_symbols:
                         row = last_scan_rows.get(symbol)
@@ -510,7 +513,11 @@ def _watch(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Pragma end-to-end quantitative pipeline")
-    parser.add_argument("--symbol", default="XAUUSD")\n    parser.add_argument("--source", choices=("auto", "mt5", "binance"), default="auto")\n    parser.add_argument("--no-cache", action="store_true", help="Disable Binance CSV cache")\n    parser.add_argument("--scan-crypto", action="store_true", help="Run a one-shot scan of major Binance USDT crypto pairs")\n    parser.add_argument("--btc-leader-filter", action="store_true", help="Suppress counter-BTC altcoin directions when BTC regime is strongly imbalanced")
+    parser.add_argument("--symbol", default="XAUUSD")
+    parser.add_argument("--source", choices=("auto", "mt5", "binance"), default="auto")
+    parser.add_argument("--no-cache", action="store_true", help="Disable Binance CSV cache")
+    parser.add_argument("--scan-crypto", action="store_true", help="Run a one-shot scan of major Binance USDT crypto pairs")
+    parser.add_argument("--btc-leader-filter", action="store_true", help="Suppress counter-BTC altcoin directions when BTC regime is strongly imbalanced")
     parser.add_argument("--bars", type=int, default=3000)
     parser.add_argument("--profile-bins", type=int, default=100)
     parser.add_argument("--macro-bias", type=int, choices=(-1, 0, 1), default=None)

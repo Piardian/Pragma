@@ -8,4 +8,4 @@ if exist "%~dp0.venv\Scripts\python.exe" (
 )
 echo Starting Pragma broker-free shadow trader...
 echo MT5 is used only as a read-only market data source. No broker orders are sent.
-"%PYTHON_EXE%" -m pragma.shadow_trader --poll-seconds 10 --bars 3000
+"%PYTHON_EXE%" -m pragma.shadow_trader --poll-seconds 10 --bars 3000 --heartbeat-minutes 0

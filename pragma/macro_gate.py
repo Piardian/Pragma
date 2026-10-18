@@ -223,7 +223,11 @@ def _begonya_roots() -> list[Path]:
     if configured:
         roots.append(Path(configured).expanduser())
     repo_root = Path(__file__).resolve().parent.parent
-    roots.extend([repo_root.parent / "Begonya", repo_root.parent / "begonya"])
+    roots.extend([
+        repo_root.parent / "Begonya00",
+        repo_root.parent / "Begonya",
+        repo_root.parent / "begonya",
+    ])
     legacy = Path.home() / ".gemini" / "antigravity" / "scratch" / "Begonya"
     roots.append(legacy)
     unique: list[Path] = []
@@ -247,6 +251,8 @@ def candidate_gate_paths() -> list[Path]:
         candidates.append(Path(legacy_env).expanduser())
     repo_root = Path(__file__).resolve().parent.parent
     candidates.extend([
+        repo_root.parent / "Begonya00" / "shared" / "macro_bias_gate.json",
+        repo_root.parent / "Begonya00" / "macro_engine" / "gateways" / "macro_bias_gate.json",
         repo_root.parent / "Begonya" / "shared" / "macro_bias_gate.json",
         repo_root.parent / "begonya" / "shared" / "macro_bias_gate.json",
         repo_root.parent / "Begonya" / "macro_engine" / "gateways" / "macro_bias_gate.json",

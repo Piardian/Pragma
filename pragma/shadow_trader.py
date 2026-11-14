@@ -134,6 +134,79 @@ class PaperTradingBook:
         drawdown = float(self.state["peak_balance"]) - balance
         self.state["max_drawdown"] = max(float(self.state.get("max_drawdown", 0.0)), drawdown)
 
+    def get_scoreboard_stats(self, target_month: str | None = None) -> dict[str, Any]:
+        """Calculate monthly and all-time closed trade statistics."""
+        if target_month is None:
+            target_month = datetime.now(timezone.utc).strftime("%Y-%m")
+
+        all_closed = self.state.get("closed_trades", [])
+        month_closed = [
+            t for t in all_closed
+            if str(t.get("exit_time", "")).startswith(target_month)
+            or (not t.get("exit_time") and str(t.get("entry_time", "")).startswith(target_month))
+        ]
+
+        target_list = month_closed if month_closed else all_closed
+        total = len(target_list)
+        net_r = sum(float(t.get("realized_r", 0.0)) for t in target_list)
+        tp_count = sum(1 for t in target_list if float(t.get("realized_r", 0.0)) > 0)
+        sl_count = sum(1 for t in target_list if float(t.get("realized_r", 0.0)) < 0)
+        be_count = sum(1 for t in target_list if float(t.get("realized_r", 0.0)) == 0)
+        win_rate = (tp_count / total * 100.0) if total > 0 else 0.0
+        open_count = len(self.state.get("open_positions", {}))
+
+        all_total = len(all_closed)
+        all_tp = sum(1 for t in all_closed if float(t.get("realized_r", 0.0)) > 0)
+        all_sl = sum(1 for t in all_closed if float(t.get("realized_r", 0.0)) < 0)
+        all_be = sum(1 for t in all_closed if float(t.get("realized_r", 0.0)) == 0)
+        all_net_r = sum(float(t.get("realized_r", 0.0)) for t in all_closed)
+
+        return {
+            "month": target_month,
+            "total_closed": total,
+            "net_r": net_r,
+            "tp_count": tp_count,
+            "sl_count": sl_count,
+            "be_count": be_count,
+            "win_rate": win_rate,
+            "open_count": open_count,
+            "is_month_specific": bool(month_closed),
+            "all_time_total": all_total,
+            "all_time_net_r": all_net_r,
+            "all_time_tp": all_tp,
+            "all_time_sl": all_sl,
+            "all_time_be": all_be,
+        }
+
+    def format_scoreboard(self, target_month: str | None = None) -> str:
+        """Format monthly and all-time performance scoreboard for Telegram alerts and reports."""
+        stats = self.get_scoreboard_stats(target_month)
+        if stats["total_closed"] == 0 and stats["all_time_total"] == 0:
+            return ""
+
+        sign = "+" if stats["net_r"] >= 0 else ""
+        sign_all = "+" if stats["all_time_net_r"] >= 0 else ""
+        period_label = stats["month"] if stats.get("is_month_specific") else "Tüm Zamanlar"
+
+        lines = [
+            f"📊 [PRAGMA RESMİ PERFORMANS SAYACI — {period_label}]",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "ℹ️ Not: Bu sayaç bildirimi PRAGMA motoruna aittir.",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"💰 Net R         : {sign}{stats['net_r']:.2f}R",
+            f"📈 Kazanma Oranı : %{stats['win_rate']:.1f} ({stats['tp_count']}/{stats['total_closed']} işlem)",
+            f"🎯 TP (Kâr Al)   : {stats['tp_count']}",
+            f"🛑 SL (Zarar Kes): {stats['sl_count']}",
+            f"🛡️ BE (Başabaş)  : {stats['be_count']}",
+        ]
+        if stats["all_time_total"] > stats["total_closed"]:
+            lines.append(f"🌐 Genel Toplam  : {sign_all}{stats['all_time_net_r']:.2f}R ({stats['all_time_tp']} TP / {stats['all_time_sl']} SL | Toplam: {stats['all_time_total']})")
+        lines.extend([
+            f"📂 Açık Pozisyon : {stats['open_count']}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        ])
+        return "\n".join(lines)
+
     def process_bar(self, symbol: str, bar_time: str, bar: dict[str, float],
                     signals: list[dict[str, Any]] | None = None,
                     rejected_signals: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -337,14 +410,28 @@ class PaperTradingBook:
                 record_trade_to_journal(self.journal_path, trade)
             except Exception as exc:
                 print(f"[JOURNAL ERROR] {exc}", flush=True)
-            self._notify(
+            scoreboard = self.format_scoreboard()
+            close_msg = (
                 f"PRAGMA SHADOW — {outcome}\n{symbol} {position['direction']}\n"
                 f"Çıkış: {float(exit_price):.5f}\nİşlem neti: {trade['net_pnl']:+.2f} "
                 f"({trade['realized_r']:+.2f}R)\nBakiye: {self.state['balance']:.2f}\n"
                 f"Max DD: {self.state['max_drawdown']:.2f}\nID: {position['trade_id']}"
             )
+            if scoreboard:
+                close_msg += f"\n\n{scoreboard}"
+            self._notify(close_msg)
         else:
             position["remaining_fraction"] = remaining
+
+
+def _append_measurement_observer(path: Path, payload: dict[str, Any]) -> bool:
+    try:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        return True
+    except Exception as exc:
+        print(f"[MEASUREMENT OBSERVER ERROR] {exc}", flush=True)
+        return False
 
 
 def _extract_signals(report: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -392,13 +479,19 @@ def run_daemon(args: argparse.Namespace) -> int:
     )
     notifier = book.notifier
     notifier_message = getattr(book, "_notify")
-    notifier_message(
+    scoreboard = book.format_scoreboard()
+    start_msg = (
         "PRAGMA SHADOW TRADER STARTED\n"
+        "ℹ️ Not: Bu sayaç bildirimi PRAGMA motoruna aittir.\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Mod: yalnızca sanal işlem | MT5: yalnızca fiyat verisi\n"
         f"Bakiye: {book.state['balance']:.2f} | İşlem riski: {book.risk_pct:.2f}%\n"
         f"State: {state_dir}\n"
         f"Journal: {journal_path.name}"
     )
+    if scoreboard:
+        start_msg += f"\n\n{scoreboard}"
+    notifier_message(start_msg)
     last_heartbeat = time.monotonic()
     last_errors: dict[str, str] = {}
     try:
@@ -464,12 +557,18 @@ def run_daemon(args: argparse.Namespace) -> int:
                 open_count = len(book.state["open_positions"])
                 closed_count = len(book.state["closed_trades"])
                 net = float(book.state["balance"]) - float(book.state["initial_balance"])
-                notifier_message(
-                    "PRAGMA SHADOW — HEARTBEAT\n"
-                    f"Bakiye: {book.state['balance']:.2f}\nNet: {net:+.2f}\n"
-                    f"Kapanan işlem: {closed_count} | Açık pozisyon: {open_count}\n"
-                    f"Max DD: {book.state['max_drawdown']:.2f}"
-                )
+                sb = book.format_scoreboard()
+                hb_lines = [
+                    "PRAGMA SHADOW — PERİYODİK SAYAÇ VE DURUM BİLDİRİMİ",
+                    "ℹ️ Not: Bu sayaç bildirimi PRAGMA motoruna aittir.",
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                    f"Bakiye: {book.state['balance']:.2f} | Net PnL: {net:+.2f}$",
+                    f"Kapanan işlem: {closed_count} | Açık pozisyon: {open_count}",
+                    f"Max DD: {book.state['max_drawdown']:.2f}$",
+                ]
+                if sb:
+                    hb_lines.extend(["", sb])
+                notifier_message("\n".join(hb_lines))
                 last_heartbeat = time.monotonic()
             time.sleep(args.poll_seconds)
     except KeyboardInterrupt:

@@ -5,7 +5,12 @@ __pycache__/
 *.tmp
 *.pid
 .pytest_cache/
+.pytest_temp/
 data_cache/
 historical_data/
 backtest_*_results.json
 check_run.py
+reports/**/frozen/
+reports/**/market_cache/
+reports/**/observer_*.log
+reports/**/ticks/

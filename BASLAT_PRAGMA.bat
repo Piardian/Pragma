@@ -11,7 +11,7 @@ echo ======================================================================
 set PYTHON_EXE=C:\Users\piard\AppData\Local\Programs\Python\Python312\python.exe
 
 :: 1. Sanal Islem Defterini (Shadow Trader) ayri bir pencerede baslat
-start "Pragma - Shadow Trader" "%PYTHON_EXE%" -m pragma.shadow_trader --poll-seconds 10 --bars 3000 --heartbeat-minutes 0
+start "Pragma - Shadow Trader" "%PYTHON_EXE%" -m pragma.shadow_trader --poll-seconds 10 --bars 3000 --heartbeat-minutes 60
 
 :: 2. Canli Begonya Watcher'i bu ana pencerede baslat
 "%PYTHON_EXE%" -u -m pragma.run_pipeline --scan-begonya --refresh-macro --watch --interval-sec 15

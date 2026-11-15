@@ -128,6 +128,14 @@ class PaperTradingBook:
             return bar["low"] <= level if direction == "LONG" else bar["high"] >= level
         return bar["high"] >= level if direction == "LONG" else bar["low"] <= level
 
+    def touch(self) -> None:
+        """Update updated_at and flush state to indicate daemon active liveness."""
+        self.state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            self._save()
+        except Exception:
+            pass
+
     def _update_drawdown(self) -> None:
         balance = float(self.state["balance"])
         self.state["peak_balance"] = max(float(self.state["peak_balance"]), balance)
@@ -493,6 +501,7 @@ def run_daemon(args: argparse.Namespace) -> int:
         start_msg += f"\n\n{scoreboard}"
     notifier_message(start_msg)
     last_heartbeat = time.monotonic()
+    last_state_touch = 0.0
     last_errors: dict[str, str] = {}
     try:
         while True:
@@ -542,9 +551,14 @@ def run_daemon(args: argparse.Namespace) -> int:
                         last_errors.pop(symbol, None)
                     except Exception as exc:
                         message = f"{type(exc).__name__}: {exc}"
-                        if last_errors.get(symbol) != message:
+                        now_mono = time.monotonic()
+                        err_key = f"{type(exc).__name__}:{message}"
+                        last_sent = last_errors.get(err_key, 0.0)
+                        should_alert = not (isinstance(last_sent, (int, float)) and (now_mono - float(last_sent) < 1800.0))
+                        if should_alert and last_errors.get(symbol) != message:
                             notifier_message(f"PRAGMA SHADOW — DATA/PIPELINE ERROR\n{symbol}\n{message}")
-                            last_errors[symbol] = message
+                            last_errors[err_key] = now_mono
+                        last_errors[symbol] = message
                         print(f"[SHADOW ERROR] {symbol}: {message}", flush=True)
             except Exception as exc:
                 message = f"{type(exc).__name__}: {exc}"
@@ -570,6 +584,9 @@ def run_daemon(args: argparse.Namespace) -> int:
                     hb_lines.extend(["", sb])
                 notifier_message("\n".join(hb_lines))
                 last_heartbeat = time.monotonic()
+            if time.monotonic() - last_state_touch >= 60.0:
+                book.touch()
+                last_state_touch = time.monotonic()
             time.sleep(args.poll_seconds)
     except KeyboardInterrupt:
         notifier_message("PRAGMA SHADOW TRADER STOPPED BY USER")

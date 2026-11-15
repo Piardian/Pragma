@@ -9,10 +9,22 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 import pandas as pd
 
@@ -90,9 +102,33 @@ class PaperTradingBook:
 
     def _save(self) -> None:
         self.state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        content = json.dumps(self.state, indent=2, ensure_ascii=False)
         temp = self.path.with_suffix(self.path.suffix + ".tmp")
-        temp.write_text(json.dumps(self.state, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(temp, self.path)
+        try:
+            temp.write_text(content, encoding="utf-8")
+        except Exception:
+            try:
+                self.path.write_text(content, encoding="utf-8")
+            except Exception as exc:
+                print(f"[WARN] Failed to write state directly: {exc}", flush=True)
+            return
+
+        for attempt in range(5):
+            try:
+                os.replace(temp, self.path)
+                return
+            except (PermissionError, OSError):
+                if attempt == 4:
+                    try:
+                        self.path.write_text(content, encoding="utf-8")
+                    except Exception as exc:
+                        print(f"[WARN] Failed to overwrite state.json: {exc}", flush=True)
+                    try:
+                        temp.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    return
+                time.sleep(0.05 * (attempt + 1))
 
     def _notify(self, text: str) -> None:
         send = getattr(self.notifier, "send_text", None)
@@ -217,7 +253,8 @@ class PaperTradingBook:
 
     def process_bar(self, symbol: str, bar_time: str, bar: dict[str, float],
                     signals: list[dict[str, Any]] | None = None,
-                    rejected_signals: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+                    rejected_signals: list[dict[str, Any]] | None = None,
+                    save: bool = True) -> list[dict[str, Any]]:
         """Process one closed M1 bar exactly once; stops win ambiguous same-bar ties."""
         symbol = symbol.upper()
         timestamp = pd.Timestamp(bar_time)
@@ -333,7 +370,8 @@ class PaperTradingBook:
                 f"Bakiye: {self.state['balance']:.2f}\nID: {trade_id}"
             )
         self.state["last_processed"][symbol] = stamp
-        self._save()
+        if save or events:
+            self._save()
         return events
 
     def _manage_position(self, symbol: str, stamp: str, bar: dict[str, float],
@@ -540,12 +578,14 @@ def run_daemon(args: argparse.Namespace) -> int:
                             )
                             latest_signal_time = pd.Timestamp(report["bars"]["last_closed_m1_time"])
                             executed_signals, rejected_signals = _extract_signals(report)
-                        for bar_time, row in pending.iterrows():
+                        pending_items = list(pending.iterrows())
+                        for idx, (bar_time, row) in enumerate(pending_items):
                             stamp = pd.Timestamp(bar_time).isoformat()
                             bar = {key: float(row[key]) for key in ("open", "high", "low", "close")}
                             cur_exec = executed_signals if pd.Timestamp(bar_time) == latest_signal_time else []
                             cur_rej = rejected_signals if pd.Timestamp(bar_time) == latest_signal_time else []
-                            events = book.process_bar(symbol, stamp, bar, cur_exec, cur_rej)
+                            is_last = (idx == len(pending_items) - 1)
+                            events = book.process_bar(symbol, stamp, bar, cur_exec, cur_rej, save=is_last)
                             if events:
                                 print(f"[SHADOW] {symbol} {stamp}: {events}", flush=True)
                         last_errors.pop(symbol, None)

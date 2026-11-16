@@ -73,7 +73,7 @@ def evaluate_trigger(
     atr_14: float,
     take_profit: float | Sequence[float],
     *,
-    min_rr: float = 1.5,
+    min_rr: float = 2.0,
     volume_multiplier: float = 1.35,
     z_extreme: float = 1.75,
     z_recovery: float = 1.65,
@@ -83,7 +83,7 @@ def evaluate_trigger(
     sl_atr_buffer: float = 0.50,
     min_spread_to_sl_ratio: float = 4.0,
     min_rr_tp1: float = 1.0,
-    min_rr_tp2: float = 1.35,
+    min_rr_tp2: float = 2.0,
     session_hours_utc: tuple[int, int] | None = None,
     confirm_binance_delta: bool = True,
 ) -> TriggerDecision:
@@ -223,8 +223,6 @@ def evaluate_trigger(
             distinct_targets and rr_tp1 is not None and rr_tp1 >= float(min_rr_tp1)
             and rr_tp2 is not None and rr_tp2 >= float(min_rr_tp2)
         )
-        # Mean-reversion uses risk-aware target selection above instead of
-        # promoting an arbitrary near TP1 to the main target.
         target_fallback = False
     else:
         split_rr_ok = bool(

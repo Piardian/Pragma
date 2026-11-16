@@ -86,6 +86,7 @@ class TradeJournalAndAnalyticsTests(unittest.TestCase):
             notifier=self.notifier,
             journal_path=self.journal_path,
             rejected_path=self.rejected_path,
+            enable_runner=False,
         )
 
     def test_record_and_load_rejected_signals(self):

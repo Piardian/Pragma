@@ -57,7 +57,8 @@ class PaperTradingBook:
     def __init__(self, state_path: str | Path, initial_balance: float = 10_000.0,
                  risk_pct: float = 1.0, notifier: Any | None = None,
                  journal_path: str | Path | None = None,
-                 rejected_path: str | Path | None = None):
+                 rejected_path: str | Path | None = None,
+                 enable_runner: bool = True):
         if initial_balance <= 0:
             raise ValueError("initial_balance must be positive")
         if not 0 < risk_pct <= 5:
@@ -67,6 +68,7 @@ class PaperTradingBook:
         self.journal_path = Path(journal_path) if journal_path else self.path.parent / "trade_journal.csv"
         self.rejected_path = Path(rejected_path) if rejected_path else self.path.parent / "rejected_signals.csv"
         self.risk_pct = float(risk_pct)
+        self.enable_runner = bool(enable_runner)
         self.notifier = notifier or ExecutionNotifier()
         self.state: dict[str, Any] = {
             "version": 1,
@@ -329,6 +331,53 @@ class PaperTradingBook:
                 continue
             if direction == "SHORT" and not (stop > entry > tp1 >= tp2):
                 continue
+
+            # Minimum 1:2 R:R Gate: Trade must offer at least 2.0R to main target
+            rr_tp2 = abs(tp2 - entry) / risk_distance if risk_distance > 0 else 0.0
+            planned_rr = float(signal.get("rr_ratio") or 0.0)
+            if max(rr_tp2, planned_rr) < 2.0:
+                record_info = {
+                    "timestamp": stamp, "symbol": symbol, "direction": direction,
+                    "poi_type": str(signal.get("poi_type", "")), "regime": str(signal.get("regime", "")),
+                    "macro_bias": signal.get("macro_bias", ""), "reason": "LOW_RR_BELOW_1_TO_2",
+                    "entry_price": entry, "stop_loss": stop, "take_profit_1": tp1,
+                    "rr_ratio": max(rr_tp2, planned_rr), "z_score": "", "volume_multiplier": "",
+                    "order_flow_delta": "", "atr": "",
+                }
+                try:
+                    record_rejected_signal(self.rejected_path, record_info)
+                except Exception:
+                    pass
+                continue
+
+            # Begonya Macro Gate Strict Directional Check
+            macro_bias = signal.get("macro_bias")
+            if macro_bias is not None:
+                try:
+                    mb = int(macro_bias)
+                    if (mb == 1 and direction != "LONG") or (mb == -1 and direction != "SHORT") or (mb == 0):
+                        record_info = {
+                            "timestamp": stamp, "symbol": symbol, "direction": direction,
+                            "poi_type": str(signal.get("poi_type", "")), "regime": str(signal.get("regime", "")),
+                            "macro_bias": mb, "reason": "MACRO_GATE_VETO",
+                            "entry_price": entry, "stop_loss": stop, "take_profit_1": tp1,
+                            "rr_ratio": max(rr_tp2, planned_rr), "z_score": "", "volume_multiplier": "",
+                            "order_flow_delta": "", "atr": "",
+                        }
+                        try:
+                            record_rejected_signal(self.rejected_path, record_info)
+                        except Exception:
+                            pass
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
+            # TP1 Tavan Sınırlaması: Cap TP1 at max 2.0R so partial profit can be reliably banked
+            sign = 1.0 if direction == "LONG" else -1.0
+            rr_tp1_dist = abs(tp1 - entry) / risk_distance
+            if rr_tp1_dist > 2.0:
+                tp1 = entry + sign * 2.0 * risk_distance
+
             risk_cash = float(self.state["balance"]) * self.risk_pct / 100.0
             trade_id = hashlib.sha256(signal_key.encode("utf-8")).hexdigest()[:16]
             position = {
@@ -338,9 +387,11 @@ class PaperTradingBook:
                 "macro_bias": signal.get("macro_bias"),
                 "entry_time": stamp, "entry_price": entry, "initial_stop": stop,
                 "final_stop": stop, "stop_loss": stop, "take_profit_1": tp1, "take_profit_2": tp2,
-                "rr_planned": float(signal.get("rr_ratio") or 0.0),
+                "rr_planned": float(signal.get("rr_ratio") or max(rr_tp2, planned_rr)),
                 "risk_distance": risk_distance, "risk_cash": risk_cash,
-                "remaining_fraction": 1.0, "tp1_done": False,
+                "remaining_fraction": 1.0, "tp1_done": False, "tp2_done": False,
+                "trailing_active": False,
+                "peak_price": entry, "peak_r": 0.0,
                 "realized_pnl": 0.0, "last_price": normalized["close"],
                 "last_bar_time": stamp,
                 "bars_held": 0,
@@ -397,33 +448,97 @@ class PaperTradingBook:
 
         # Conservative OHLC convention: if SL and target are both touched, SL wins.
         if self._bar_hits(bar, direction, stop, "sl"):
-            outcome = "BE" if position.get("tp1_done") and abs(stop - float(position["entry_price"])) <= 1e-12 else "SL"
+            if position.get("trailing_active"):
+                outcome = "TRAILING_STOP"
+            elif position.get("tp1_done") and abs(stop - float(position["entry_price"])) <= 1e-6:
+                outcome = "BE"
+            else:
+                outcome = "SL"
             self._realize(symbol, stamp, position, stop, float(position["remaining_fraction"]), outcome)
             return [{"type": "CLOSE", "symbol": symbol, "outcome": outcome, "time": stamp}]
         tp1, tp2 = float(position["take_profit_1"]), float(position["take_profit_2"])
         distinct = abs(tp2 - tp1) > 1e-12
-        if not position["tp1_done"] and self._bar_hits(bar, direction, tp1, "tp"):
-            fraction = 0.5 if distinct else 1.0
+
+        # 1. Aşama: TP1 Vurulduğunda (%50 Kâr Al + Breakeven'a Çek)
+        if not position.get("tp1_done") and self._bar_hits(bar, direction, tp1, "tp"):
+            fraction = 0.50 if distinct else 1.0
             self._realize(symbol, stamp, position, tp1, fraction, "TP1" if distinct else "TP")
             if not distinct:
                 return [{"type": "CLOSE", "symbol": symbol, "outcome": "TP", "time": stamp}]
             position["tp1_done"] = True
-            position["remaining_fraction"] = 0.5
+            position["remaining_fraction"] = 0.50
             position["stop_loss"] = float(position["entry_price"])
             position["final_stop"] = float(position["entry_price"])
             position["last_price"] = bar["close"]
             position["last_bar_time"] = stamp
             self._notify(
-                f"PRAGMA SHADOW — TP1\n{symbol} {direction}\nTP1: {tp1:.5f}\n"
-                f"Kısmi gerçekleşen PnL: {position['realized_pnl']:+.2f}\n"
-                f"Kalan pozisyon: %50 | Yeni SL: {position['stop_loss']:.5f}\n"
-                f"Bakiye: {self.state['balance']:.2f}"
+                f"PRAGMA SHADOW — TP1 VURULDU\n{symbol} {direction}\nTP1: {tp1:.5f}\n"
+                f"Kısmi kâr: %50 alındı ({position['realized_pnl']:+.2f}$)\n"
+                f"Kalan: %50 | Stop: Breakeven ({position['stop_loss']:.5f})\n"
+                f"Bakiye: {self.state['balance']:.2f}$"
             )
             # Do not assume TP2 was reached later in the same OHLC bar.
             return [{"type": "TP1", "symbol": symbol, "time": stamp}]
-        if position["tp1_done"] and self._bar_hits(bar, direction, tp2, "tp"):
-            self._realize(symbol, stamp, position, tp2, float(position["remaining_fraction"]), "TP2")
-            return [{"type": "CLOSE", "symbol": symbol, "outcome": "TP2", "time": stamp}]
+
+        # 2. Aşama: TP2 Vurulduğunda
+        if position.get("tp1_done") and not position.get("tp2_done") and self._bar_hits(bar, direction, tp2, "tp"):
+            if self.enable_runner:
+                fraction = 0.25
+                self._realize(symbol, stamp, position, tp2, fraction, "TP2")
+                position["tp2_done"] = True
+                position["remaining_fraction"] = 0.25
+                position["trailing_active"] = True
+
+                # Trailing stop asgari kilidi: TP1 seviyesi (en az +1.0R kilitli kâr)
+                sign = 1.0 if direction == "LONG" else -1.0
+                tp1_r = abs(tp1 - entry) / risk_dist
+                lock_in_r = max(1.0, tp1_r)
+                initial_trail_sl = entry + sign * lock_in_r * risk_dist
+                position["stop_loss"] = initial_trail_sl
+                position["final_stop"] = initial_trail_sl
+                position["peak_price"] = tp2
+                position["peak_r"] = abs(tp2 - entry) / risk_dist
+                position["last_price"] = bar["close"]
+                position["last_bar_time"] = stamp
+                self._notify(
+                    f"PRAGMA SHADOW — TP2 VURULDU\n{symbol} {direction}\nTP2: {tp2:.5f}\n"
+                    f"Kısmi kâr: %25 alındı (Toplam %75 kâr: {position['realized_pnl']:+.2f}$)\n"
+                    f"Kalan: %25 (RUNNER) | Trailing SL: {position['stop_loss']:.5f} (+{lock_in_r:.2f}R Kilitli)\n"
+                    f"Bakiye: {self.state['balance']:.2f}$"
+                )
+                return [{"type": "TP2", "outcome": "TP2", "symbol": symbol, "time": stamp}]
+            else:
+                self._realize(symbol, stamp, position, tp2, float(position["remaining_fraction"]), "TP2")
+                return [{"type": "CLOSE", "outcome": "TP2", "symbol": symbol, "time": stamp}]
+
+        # 3. Aşama: Runner Aktifken Trailing Stop Güncellemesi
+        if position.get("trailing_active"):
+            sign = 1.0 if direction == "LONG" else -1.0
+            tp1_r = abs(tp1 - entry) / risk_dist
+            min_lock_r = max(1.0, tp1_r)
+            if direction == "LONG":
+                cur_high = bar["high"]
+                if cur_high > float(position.get("peak_price", entry)):
+                    position["peak_price"] = cur_high
+                    peak_r = (cur_high - entry) / risk_dist
+                    position["peak_r"] = peak_r
+                    lock_r = max(min_lock_r, peak_r - 0.75)
+                    new_sl = entry + lock_r * risk_dist
+                    if new_sl > float(position["stop_loss"]):
+                        position["stop_loss"] = new_sl
+                        position["final_stop"] = new_sl
+            else:
+                cur_low = bar["low"]
+                if cur_low < float(position.get("peak_price", entry)):
+                    position["peak_price"] = cur_low
+                    peak_r = (entry - cur_low) / risk_dist
+                    position["peak_r"] = peak_r
+                    lock_r = max(min_lock_r, peak_r - 0.75)
+                    new_sl = entry - lock_r * risk_dist
+                    if new_sl < float(position["stop_loss"]):
+                        position["stop_loss"] = new_sl
+                        position["final_stop"] = new_sl
+
         position["last_price"] = bar["close"]
         position["last_bar_time"] = stamp
         return events

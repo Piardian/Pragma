@@ -26,7 +26,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 DEFAULT_CRYPTO_SCAN_SYMBOLS = ("BTCUSDT", "SOLUSDT", "LINKUSDT")
 
 # Unprofitable Forex pairs identified in 1-year Walk-Forward backtests
-BLACKLIST_FOREX_SYMBOLS = ("GBPUSD", "NZDUSD")
+BLACKLIST_FOREX_SYMBOLS = ("GBPUSD", "NZDUSD", "CADCHF")
 
 # UTC hour interval [start, end): active London/New York trading window.
 ACTIVE_TRADING_HOURS_UTC = (6, 20)

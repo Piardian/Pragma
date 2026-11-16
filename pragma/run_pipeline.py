@@ -7,6 +7,24 @@ Examples:
 """
 from __future__ import annotations
 
+import sys
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+if __name__ == "__main__" and ("--watch" in sys.argv):
+    import runpy as _singleton_runpy
+    from pathlib import Path as _SingletonPath
+    _singleton_guard = _singleton_runpy.run_path(str(_SingletonPath(__file__).with_name("deployment_singleton.py")))
+    _singleton_guard["acquire"](__file__)
+
 import argparse
 import json
 import time
@@ -26,6 +44,7 @@ from pragma.instrument_profiles import canonical_symbol, default_trigger_tf_for_
 from pragma.regime_poi_engine import generate_regime_pois
 from pragma.trigger_engine import evaluate_trigger
 from pragma.vwap_engine import VWAPEngine
+from pragma.measurement import ExecutionCosts, evaluate_prefix
 
 
 def _session_labels(bars: pd.DataFrame) -> pd.Series:
@@ -118,6 +137,8 @@ def run_pipeline(
     source: str = "auto",
     no_cache: bool = False,
     btc_leader_regime: str | None = None,
+    measurement_mode: bool = False,
+    measurement_costs: ExecutionCosts | None = None,
 ) -> dict[str, Any]:
     """Run all analytical layers and return a JSON-serializable report."""
     clock = pd.Timestamp(now if now is not None else datetime.now(timezone.utc))
@@ -201,6 +222,45 @@ def run_pipeline(
         raise ValueError("At least 30 fully closed M1 bars are required")
     if m1[session_key].nunique() < 2:
         raise ValueError("At least two M1 sessions are required for previous-session AMT")
+
+    # Observer-first migration: the established alert/book path is unchanged.
+    # Research and --measurement callers use this shared, notification-free path.
+    try:
+        measurement = evaluate_prefix(
+            m1, symbol=symbol, macro_bias=bias, profile_bins=profile_bins,
+            trigger_tf=trigger_tf, allow_range=allow_range,
+            allow_mean_reversion=allow_mean_reversion,
+            disable_trend_pullback=disable_trend_pullback,
+            btc_leader_filter=btc_leader_regime is not None,
+            btc_leader_regime=btc_leader_regime,
+            costs=measurement_costs or ExecutionCosts(
+                fixed_per_side=cost_price,
+                commission_bps=4.0 if selected_source == "binance" else 0.0,
+                funding_rate_8h=0.0001 if selected_source == "binance" else 0.0,
+                provenance="ASSUMED" if selected_source == "binance" else "UNMEASURED"),
+        )
+    except Exception as exc:
+        if measurement_mode:
+            raise
+        # Observer failures must never interrupt legacy signals or book upkeep.
+        measurement = {"contract": "measurement-v2", "symbol": symbol,
+                       "veto": "OBSERVER_ERROR", "error": f"{type(exc).__name__}: {exc}",
+                       "pois": [], "triggers": [], "edge_proven": False}
+    measurement.update(observed_at=clock.isoformat(), source=selected_source,
+                       cost_evidence=(measurement_costs.provenance if measurement_costs else "UNMEASURED_OR_ASSUMED"),
+                       live_execution=False, edge_proven=False)
+    if measurement_mode:
+        return {
+            "symbol": symbol, "instrument_profile": instrument_profile.name,
+            "trigger_tf": trigger_tf, "dry_run": dry_run,
+            "macro": {"bias": bias, "source": macro_source, "reason": macro_reason},
+            "bars": {"last_closed_m1_time": m1.index[-1].isoformat(),
+                     "m1_closed_count": len(m1), "m15_closed_count": len(m15),
+                     "forming_m1_excluded": True},
+            "regime": measurement["regime"], "pois": measurement["pois"],
+            "triggers": measurement["triggers"] if not measurement["veto"] else [],
+            "notifications": [], "measurement": measurement,
+        }
 
     last_bar_time = m1.index[-1]
     last_bar = m1.iloc[-1]
@@ -291,7 +351,7 @@ def run_pipeline(
             "metrics": decision.metrics,
             "poi_type": poi.poi_type,
         })
-        if decision.execute and notify_pois:
+        if decision.execute and not dry_run:
             notifications.append(notifier_instance.notify(
                 symbol, poi, decision, regime_decision.regime, last_bar_time
             ))
@@ -343,6 +403,7 @@ def run_pipeline(
         "pois": poi_reports,
         "triggers": trigger_reports,
         "notifications": notifications,
+        "measurement_observer": measurement,
     }
 
 
@@ -357,15 +418,21 @@ def _default_point_size(symbol: str) -> float:
     return 0.00001
 
 
-def _latest_closed_m1_time(symbol: str) -> pd.Timestamp | None:
+def _latest_closed_m1_time(symbol: str, client: MT5DataClient | None = None) -> pd.Timestamp | None:
     """Cheap watch poll: return the timestamp of the latest fully closed M1 bar."""
-    with MT5DataClient() as client:
-        raw = client.rates(symbol, "M1", 3)
+    if client is not None:
+        try:
+            raw = client.rates(symbol, "M1", 3)
+        except Exception:
+            return None
+    else:
+        with MT5DataClient() as c:
+            raw = c.rates(symbol, "M1", 3)
     closed = filter_closed_bars(raw, "M1", now=pd.Timestamp.now(tz="UTC"))
     return None if closed.empty else pd.Timestamp(closed.index[-1])
 
 
-def _active_begonya_mt5_symbols(include_blacklisted: bool = False) -> list[tuple[str, int]]:
+def _active_begonya_mt5_symbols(include_blacklisted: bool = False, client: MT5DataClient | None = None) -> list[tuple[str, int]]:
     """Return broker symbols that have a fresh, non-neutral Begonya bias."""
     gate = MacroGate()
     active: dict[str, int] = {}
@@ -379,8 +446,14 @@ def _active_begonya_mt5_symbols(include_blacklisted: bool = False) -> list[tuple
             active[canon] = bias
     if not active:
         return []
-    with MT5DataClient() as client:
-        broker_symbols = client.symbols()
+    if client is not None:
+        try:
+            broker_symbols = client.symbols()
+        except Exception:
+            return []
+    else:
+        with MT5DataClient() as c:
+            broker_symbols = c.symbols()
     matched: dict[str, str] = {}
     for broker_symbol in broker_symbols:
         key = canonical_symbol(broker_symbol)
@@ -465,12 +538,13 @@ def _watch(args: argparse.Namespace) -> int:
             f"poll={args.interval_sec}s",
             flush=True,
         )
+    mt5_client = MT5DataClient()
     try:
         while True:
             try:
                 if args.scan_begonya:
                     include_blacklisted = bool(getattr(args, "include_blacklisted", False))
-                    active_symbols = _active_begonya_mt5_symbols(include_blacklisted=include_blacklisted)
+                    active_symbols = _active_begonya_mt5_symbols(include_blacklisted=include_blacklisted, client=mt5_client)
                     active_names = {symbol for symbol, _ in active_symbols}
                     for stale_symbol in set(last_scan_rows) - active_names:
                         last_scan_rows.pop(stale_symbol, None)
@@ -478,7 +552,7 @@ def _watch(args: argparse.Namespace) -> int:
                         print("BEGONYA SCAN | no active non-neutral gate symbols found in MT5", flush=True)
                     any_updated = False
                     for symbol, bias in active_symbols:
-                        latest_time = _latest_closed_m1_time(symbol)
+                        latest_time = _latest_closed_m1_time(symbol, client=mt5_client)
                         if latest_time is None:
                             if symbol not in last_scan_rows:
                                 last_scan_rows[symbol] = {

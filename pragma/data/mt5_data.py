@@ -6,9 +6,12 @@ MetaTrader5 Python package. MT5 timestamps are UTC; returned indexes are UTC.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import os
+import time
 from typing import Optional
 
 import pandas as pd
+from .clock_alignment import observed_offset_seconds, normalize_reported_frame
 
 
 class MT5DataError(RuntimeError):
@@ -78,16 +81,42 @@ class MT5DataClient:
         self._initialized_here = False
 
     def connect(self) -> None:
-        if self.mt5.terminal_info() is not None:
-            return
-        if not self.mt5.initialize():
-            raise MT5DataError(f"MT5 initialize failed: {self.mt5.last_error()}")
-        self._initialized_here = True
+        try:
+            if self.mt5.terminal_info() is not None and self.mt5.account_info() is not None:
+                return
+        except Exception:
+            pass
+
+        standard_path = r"C:\Program Files\MetaTrader 5\terminal64.exe"
+        five_percent = r"C:\Program Files\Five Percent Online MetaTrader 5\terminal64.exe"
+        for p in (standard_path, five_percent):
+            if os.path.exists(p):
+                for _ in range(3):
+                    try:
+                        if self.mt5.initialize(path=p):
+                            acc = self.mt5.account_info()
+                            if acc is not None and getattr(acc, "login", 0) > 0:
+                                self._initialized_here = True
+                                return
+                    except Exception:
+                        pass
+                    time.sleep(0.15)
+
+        for _ in range(3):
+            try:
+                if self.mt5.initialize():
+                    self._initialized_here = True
+                    return
+            except Exception:
+                pass
+            time.sleep(0.15)
+        raise MT5DataError(f"MT5 initialize failed: {self.mt5.last_error()}")
 
     def close(self) -> None:
-        if self._initialized_here:
-            self.mt5.shutdown()
-            self._initialized_here = False
+        # Do not aggressively shutdown the shared MT5 terminal IPC connection.
+        # Calling shutdown() breaks IPC connections of concurrent trading daemons
+        # and triggers authorization failure crashes (-6).
+        pass
 
     def __enter__(self):
         self.connect()
@@ -137,24 +166,46 @@ class MT5DataClient:
     def rates(self, symbol: str, timeframe: str = "M1", count: int = 1500) -> pd.DataFrame:
         if count <= 0:
             raise ValueError("count must be positive")
-        self.connect()
-        if not self.mt5.symbol_select(symbol, True):
-            raise MT5DataError(f"Cannot select symbol {symbol!r}: {self.mt5.last_error()}")
-        raw = self.mt5.copy_rates_from_pos(symbol, self._timeframe(timeframe), 0, count)
-        return self._normalize_rates(raw)
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                self.connect()
+                if not self.mt5.symbol_select(symbol, True):
+                    raise MT5DataError(f"Cannot select symbol {symbol!r}: {self.mt5.last_error()}")
+                offset = observed_offset_seconds(self.mt5)
+                raw = self.mt5.copy_rates_from_pos(symbol, self._timeframe(timeframe), 1, count)
+                frame = normalize_reported_frame(self._normalize_rates(raw), offset)
+                frame.attrs.update(source="mt5", volume_semantics="BROKER_TICK_COUNT")
+                return frame
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 2:
+                    time.sleep(0.15 * (attempt + 1))
+        raise MT5DataError(f"Failed to fetch rates for {symbol}: {last_exc}") from last_exc
 
     def rates_from(self, symbol: str, timeframe: str, start: datetime,
                    count: int) -> pd.DataFrame:
         """Fetch rates ending at/around a UTC-aware datetime."""
         if start.tzinfo is None:
             raise ValueError("start must be timezone-aware")
-        self.connect()
-        if not self.mt5.symbol_select(symbol, True):
-            raise MT5DataError(f"Cannot select symbol {symbol!r}")
-        raw = self.mt5.copy_rates_from(
-            symbol, self._timeframe(timeframe), start.astimezone(timezone.utc), count
-        )
-        return self._normalize_rates(raw)
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                self.connect()
+                if not self.mt5.symbol_select(symbol, True):
+                    raise MT5DataError(f"Cannot select symbol {symbol!r}")
+                offset = observed_offset_seconds(self.mt5)
+                raw = self.mt5.copy_rates_from(
+                    symbol, self._timeframe(timeframe), start.astimezone(timezone.utc) + timedelta(seconds=offset), count
+                )
+                frame = normalize_reported_frame(self._normalize_rates(raw), offset)
+                frame.attrs.update(source="mt5", volume_semantics="BROKER_TICK_COUNT")
+                return frame
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 2:
+                    time.sleep(0.15 * (attempt + 1))
+        raise MT5DataError(f"Failed to fetch rates_from for {symbol}: {last_exc}") from last_exc
 
     def ticks_from(self, symbol: str, start: datetime, count: int = 10000) -> pd.DataFrame:
         """Fetch raw ticks from a UTC-aware start time."""
@@ -165,8 +216,9 @@ class MT5DataClient:
         self.connect()
         if not self.mt5.symbol_select(symbol, True):
             raise MT5DataError(f"Cannot select symbol {symbol!r}")
+        offset = observed_offset_seconds(self.mt5)
         raw = self.mt5.copy_ticks_from(
-            symbol, start.astimezone(timezone.utc), count, self.mt5.COPY_TICKS_ALL
+            symbol, start.astimezone(timezone.utc) + timedelta(seconds=offset), count, self.mt5.COPY_TICKS_ALL
         )
         if raw is None or len(raw) == 0:
             raise MT5DataError(f"No ticks returned for {symbol}: {self.mt5.last_error()}")
@@ -174,7 +226,7 @@ class MT5DataClient:
         time_col = "time_msc" if "time_msc" in frame.columns else "time"
         unit = "ms" if time_col == "time_msc" else "s"
         frame["time"] = pd.to_datetime(frame[time_col], unit=unit, utc=True)
-        return frame.set_index("time").sort_index()
+        return normalize_reported_frame(frame.set_index("time").sort_index(), offset)
 
     @staticmethod
     def tick_price_histogram(

@@ -776,7 +776,9 @@ class WatchdogRunner:
 
                  chat_id: str | None = None,
 
-                 dry_run: bool = False):
+                 dry_run: bool = False,
+
+                 consecutive_failures_threshold: int = 1):
 
         self.state_file = Path(state_file)
 
@@ -791,6 +793,8 @@ class WatchdogRunner:
         self.chat_id = chat_id
 
         self.dry_run = dry_run
+
+        self.consecutive_failures_threshold = consecutive_failures_threshold
 
 
 
@@ -866,6 +870,8 @@ class WatchdogRunner:
 
         alert_history = self.state.setdefault("alert_history", {})
 
+        failure_counts = self.state.setdefault("failure_counts", {})
+
 
 
         # Process status transitions
@@ -886,15 +892,21 @@ class WatchdogRunner:
 
             if curr_status in ("CRASHED", "STALLED", "NO_DATA"):
 
+                failure_counts[k] = failure_counts.get(k, 0) + 1
+
                 should_alert = False
 
-                if prev_status not in ("CRASHED", "STALLED", "NO_DATA"):
+                thresh = getattr(self, "consecutive_failures_threshold", 1)
 
-                    should_alert = True  # New failure
+                if failure_counts[k] >= thresh:
 
-                elif (now - last_alert_time) > 7200:  # Repeat alert every 2 hours if still broken
+                    if prev_status not in ("CRASHED", "STALLED", "NO_DATA") or (failure_counts[k] == thresh):
 
-                    should_alert = True
+                        should_alert = True  # Verified failure
+
+                    elif (now - last_alert_time) > 7200:  # Repeat alert every 2 hours if still broken
+
+                        should_alert = True
 
 
 
@@ -928,9 +940,17 @@ class WatchdogRunner:
 
             # Recovery transition (CRASHED/STALLED -> OK)
 
-            elif curr_status == "OK" and prev_status in ("CRASHED", "STALLED", "NO_DATA"):
+            elif curr_status == "OK":
 
-                recovery_msg = (
+                thresh = getattr(self, "consecutive_failures_threshold", 1)
+
+                had_alarm = prev_status in ("CRASHED", "STALLED", "NO_DATA") and failure_counts.get(k, 0) >= thresh
+
+                failure_counts[k] = 0
+
+                if had_alarm:
+
+                    recovery_msg = (
 
                     f"✅ PRAGMA WATCHDOG — DÜZELDİ\n"
 

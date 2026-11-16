@@ -656,10 +656,12 @@ def run_daemon(args: argparse.Namespace) -> int:
     last_heartbeat = time.monotonic()
     last_state_touch = 0.0
     last_errors: dict[str, str] = {}
+    consecutive_errors: dict[str, int] = {}
+    mt5_client = MT5DataClient()
     try:
         while True:
             try:
-                active_symbols = _active_begonya_mt5_symbols()
+                active_symbols = _active_begonya_mt5_symbols(client=mt5_client)
                 active_names = {symbol.upper() for symbol, _bias in active_symbols}
                 # Existing virtual positions must keep being managed if a macro gate turns neutral.
                 for open_symbol in list(book.state["open_positions"]):
@@ -672,8 +674,7 @@ def run_daemon(args: argparse.Namespace) -> int:
                     print("[SHADOW] Aktif Begonya sembolü bulunamadı; yeniden denenecek.", flush=True)
                 for symbol, _bias in active_symbols:
                     try:
-                        with MT5DataClient() as client:
-                            raw = client.rates(symbol, "M1", args.bars)
+                        raw = mt5_client.rates(symbol, "M1", args.bars)
                         closed = filter_closed_bars(raw, "M1", now=pd.Timestamp.now(tz="UTC"))
                         if closed.empty:
                             continue
@@ -704,12 +705,17 @@ def run_daemon(args: argparse.Namespace) -> int:
                             if events:
                                 print(f"[SHADOW] {symbol} {stamp}: {events}", flush=True)
                         last_errors.pop(symbol, None)
+                        consecutive_errors.pop(symbol, None)
                     except Exception as exc:
                         message = f"{type(exc).__name__}: {exc}"
                         now_mono = time.monotonic()
                         err_key = f"{type(exc).__name__}:{message}"
                         last_sent = last_errors.get(err_key, 0.0)
-                        should_alert = not (isinstance(last_sent, (int, float)) and (now_mono - float(last_sent) < 1800.0))
+                        consecutive_errors[symbol] = consecutive_errors.get(symbol, 0) + 1
+                        # Only alert if an error persists for >= 5 consecutive cycles (>= 50s) AND at least 30m since last alert
+                        should_alert = (consecutive_errors[symbol] >= 5) and (
+                            not (isinstance(last_sent, (int, float)) and (now_mono - float(last_sent) < 1800.0))
+                        )
                         if should_alert and last_errors.get(symbol) != message:
                             notifier_message(f"PRAGMA SHADOW — DATA/PIPELINE ERROR\n{symbol}\n{message}")
                             last_errors[err_key] = now_mono

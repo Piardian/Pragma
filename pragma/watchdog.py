@@ -438,17 +438,17 @@ def get_default_targets() -> dict[str, dict[str, Any]]:
 
             "name": "Begonya Classic (SMC & Macro)",
 
-            "exe": "python",
+            "exe": "node",
 
-            "patterns": ["scratch", "begonya", "start_begonya.py"],
+            "patterns": ["begonya", "smc_engine"],
 
             "type": "file",
 
-            "path": str(scratch / "Begonya" / "scripts" / "supervisor_logs" / "trading_systems_supervisor.log"),
+            "path": str(scratch / "Begonya" / "smc_engine" / "telemetry" / "polling.jsonl"),
 
             "is_forex": True,
 
-            "max_stale_sec": 900,
+            "max_stale_sec": 1800,  # 15m timeframe bar scanner + multi-symbol scan latency
 
         },
 
@@ -952,23 +952,23 @@ class WatchdogRunner:
 
                     recovery_msg = (
 
-                    f"✅ PRAGMA WATCHDOG — DÜZELDİ\n"
+                        f"✅ PRAGMA WATCHDOG — DÜZELDİ\n"
 
-                    f"Sistem: {ev['name']}\n"
+                        f"Sistem: {ev['name']}\n"
 
-                    f"Durum: Yeniden sağlıklı veri akışı başladı.\n"
+                        f"Durum: Yeniden sağlıklı veri akışı başladı.\n"
 
-                    f"Detay: {ev['detail']}\n"
+                        f"Detay: {ev['detail']}\n"
 
-                    f"Zaman: {now_dt.strftime('%H:%M:%S UTC')}"
+                        f"Zaman: {now_dt.strftime('%H:%M:%S UTC')}"
 
-                )
+                    )
 
-                if not self.dry_run:
+                    if not self.dry_run:
 
-                    send_telegram(recovery_msg, self.bot_token, self.chat_id)
+                        send_telegram(recovery_msg, self.bot_token, self.chat_id)
 
-                safe_print(f"[WATCHDOG RECOVERY] {ev['name']} recovered.")
+                    safe_print(f"[WATCHDOG RECOVERY] {ev['name']} recovered.")
 
 
 
@@ -1046,6 +1046,8 @@ def main() -> None:
 
     parser.add_argument("--dry-run", action="store_true", help="Execute evaluation without sending actual Telegram alerts")
 
+    parser.add_argument("--consecutive-failures", type=int, default=2, help="Consecutive failed cycles before Telegram alarm (default: 2)")
+
 
 
     args = parser.parse_args()
@@ -1061,6 +1063,8 @@ def main() -> None:
         stale_threshold_sec=args.stale_threshold_sec,
 
         dry_run=args.dry_run,
+
+        consecutive_failures_threshold=args.consecutive_failures,
 
     )
 

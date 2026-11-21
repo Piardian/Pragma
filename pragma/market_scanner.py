@@ -81,6 +81,7 @@ def run_scan_cycle(bars_count: int = 3000,
                 symbol=symbol,
                 bars_count=bars_count,
                 notifier=notifier,
+                notify_pois=False,
             )
             results.append({
                 "symbol": symbol,

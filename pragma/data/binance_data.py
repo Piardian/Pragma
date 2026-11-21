@@ -77,6 +77,7 @@ def _parse_rows(rows: list) -> pd.DataFrame:
     frame["tick_volume"] = frame["volume"]
     frame = frame.set_index("time").sort_index()
     frame.index.name = "time"
+    frame.attrs.update(source="binance", volume_semantics="EXCHANGE_BASE_VOLUME")
     frame = frame[~frame.index.duplicated(keep="last")]
     return frame
 

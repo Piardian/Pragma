@@ -8,7 +8,7 @@ conservatively: stop loss takes priority over targets.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import json
 import math
@@ -28,6 +28,7 @@ from pragma.instrument_profiles import default_trigger_tf_for_symbol, get_instru
 from pragma.regime_poi_engine import generate_regime_pois
 from pragma.trigger_engine import evaluate_trigger
 from pragma.vwap_engine import VWAPEngine
+from pragma.measurement import (ExecutionCosts, decide_regime, decide_trigger, low_volume_veto, decision_snapshot)
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,10 @@ class BacktestTrade:
     tp1_taken: bool
     funding_events: int = 0
     funding_cost_r: float = 0.0
+    signal_bar_time: str | None = None
+    decision_time: str | None = None
+    fill_time: str | None = None
+    exit_time_precision: str = "BAR_CLOSE_UPPER_BOUND"
 
 
 @dataclass(frozen=True)
@@ -73,6 +78,7 @@ class BacktestReport:
     trades: list[dict[str, Any]] | None = None
     funding_events_total: int = 0
     funding_cost_r_total: float = 0.0
+    measurement: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -98,6 +104,10 @@ class _OpenTrade:
     be_offset_r: float | None = 0.0
     funding_events: int = 0
     funding_cost_r: float = 0.0
+    funding_rate_8h: float = 0.0001
+    entry_at_open: bool = False
+    signal_bar_time: str | None = None
+    decision_time: str | None = None
 
 
 def _trade_record(position: _OpenTrade, timestamp: pd.Timestamp,
@@ -108,6 +118,8 @@ def _trade_record(position: _OpenTrade, timestamp: pd.Timestamp,
         position.entry_price, position.initial_stop_loss, position.tp1, position.tp2,
         reason, float(position.r_multiple), position.tp1_taken,
         position.funding_events, float(position.funding_cost_r),
+        signal_bar_time=position.signal_bar_time, decision_time=position.decision_time,
+        fill_time=position.entry_time.isoformat(),
     )
 
 
@@ -132,10 +144,12 @@ def _apply_funding(position: _OpenTrade, exit_time: pd.Timestamp) -> None:
         return
     total_funding_r = 0.0
     for event in events:
-        is_after_tp1 = position.tp1_taken and position.tp1_time is not None and event >= position.tp1_time
+        # A partial and funding at the same OHLC time bound have unknown order;
+        # retain full notional at that boundary rather than inventing savings.
+        is_after_tp1 = position.tp1_taken and position.tp1_time is not None and event > position.tp1_time
         fraction = (1.0 - position.tp1_close_pct) if is_after_tp1 else 1.0
         notional = fraction * position.entry_price
-        event_cost_price = notional * 0.0001  # 0.01%
+        event_cost_price = notional * position.funding_rate_8h
         delta_r = event_cost_price / position.initial_risk
         total_funding_r += delta_r
     position.funding_events = len(events)
@@ -148,13 +162,18 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
                        cost_pct: float = 0.0,
                        apply_funding: bool = False) -> BacktestTrade | None:
     """Advance one subsequent closed candle; return a record only when flat."""
-    if timestamp <= position.entry_time:
+    if timestamp < position.entry_time or (timestamp == position.entry_time and not position.entry_at_open):
         return None
+    # OHLC exit order is unknown; use bar close as a conservative time bound.
+    exit_timestamp = timestamp + pd.Timedelta(minutes=1) if position.entry_at_open else timestamp
     low, high = float(bar["low"]), float(bar["high"])
     direction = position.direction
     stop_hit = low <= position.stop_loss if direction == "LONG" else high >= position.stop_loss
     if stop_hit:
-        exit_price = _adverse_price(position.stop_loss, direction, False, cost, cost_pct)
+        stop_reference = position.stop_loss
+        if "open" in bar:
+            stop_reference = min(stop_reference, float(bar["open"])) if direction == "LONG" else max(stop_reference, float(bar["open"]))
+        exit_price = _adverse_price(stop_reference, direction, False, cost, cost_pct)
         if position.tp1_taken:
             remaining_r = (1.0 - position.tp1_close_pct) * (
                 (exit_price - position.entry_price) if direction == "LONG"
@@ -169,8 +188,8 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
             ) / position.initial_risk
             reason = "STOP_LOSS"
         if apply_funding:
-            _apply_funding(position, timestamp)
-        return _trade_record(position, timestamp, reason)
+            _apply_funding(position, exit_timestamp)
+        return _trade_record(position, exit_timestamp, reason)
 
     tp1_hit = high >= position.tp1 if direction == "LONG" else low <= position.tp1
     tp2_hit = high >= position.tp2 if direction == "LONG" else low <= position.tp2
@@ -182,8 +201,8 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
             else (position.entry_price - target_exit)
         ) / position.initial_risk
         if apply_funding:
-            _apply_funding(position, timestamp)
-        return _trade_record(position, timestamp, "TAKE_PROFIT_2_SINGLE_TARGET")
+            _apply_funding(position, exit_timestamp)
+        return _trade_record(position, exit_timestamp, "TAKE_PROFIT_2_SINGLE_TARGET")
     if not position.tp1_taken and tp1_hit:
         if position.tp1_close_pct <= 0.0:
             if tp2_hit:
@@ -193,8 +212,8 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
                     else (position.entry_price - target_exit)
                 ) / position.initial_risk
                 if apply_funding:
-                    _apply_funding(position, timestamp)
-                return _trade_record(position, timestamp, "TAKE_PROFIT_2")
+                    _apply_funding(position, exit_timestamp)
+                return _trade_record(position, exit_timestamp, "TAKE_PROFIT_2")
             return None
         tp1_exit = _adverse_price(position.tp1, direction, False, cost, cost_pct)
         position.r_multiple += position.tp1_close_pct * (
@@ -202,7 +221,7 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
             else (position.entry_price - tp1_exit)
         ) / position.initial_risk
         position.tp1_taken = True
-        position.tp1_time = timestamp
+        position.tp1_time = exit_timestamp
         if position.be_offset_r is not None:
             offset = position.be_offset_r * position.initial_risk
             position.stop_loss = position.entry_price + offset if direction == "LONG" else position.entry_price - offset
@@ -219,17 +238,17 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
                 else (position.entry_price - tp2_exit)
             ) / position.initial_risk
             if apply_funding:
-                _apply_funding(position, timestamp)
-            return _trade_record(position, timestamp, "TP1_TP2_SAME_BAR")
+                _apply_funding(position, exit_timestamp)
+            return _trade_record(position, exit_timestamp, "TP1_TP2_SAME_BAR")
         if breakeven_hit:
-            be_exit = _adverse_price(position.entry_price, direction, False, cost, cost_pct)
+            be_exit = _adverse_price(position.stop_loss, direction, False, cost, cost_pct)
             position.r_multiple += (1.0 - position.tp1_close_pct) * (
                 (be_exit - position.entry_price) if direction == "LONG"
                 else (position.entry_price - be_exit)
             ) / position.initial_risk
             if apply_funding:
-                _apply_funding(position, timestamp)
-            return _trade_record(position, timestamp, "TP1_THEN_BREAKEVEN_SAME_BAR")
+                _apply_funding(position, exit_timestamp)
+            return _trade_record(position, exit_timestamp, "TP1_THEN_BREAKEVEN_SAME_BAR" if position.be_offset_r == 0 else "TP1_THEN_STOP_SAME_BAR")
         return None
 
     if position.tp1_taken and tp2_hit:
@@ -239,15 +258,17 @@ def _manage_open_trade(position: _OpenTrade, bar: pd.Series,
             else (position.entry_price - tp2_exit)
         ) / position.initial_risk
         if apply_funding:
-            _apply_funding(position, timestamp)
-        return _trade_record(position, timestamp, "TAKE_PROFIT_2")
+            _apply_funding(position, exit_timestamp)
+        return _trade_record(position, exit_timestamp, "TAKE_PROFIT_2")
     return None
 
 
 def _utc_index(frame: pd.DataFrame, name: str) -> pd.DataFrame:
     if not isinstance(frame.index, pd.DatetimeIndex):
         raise ValueError(f"{name} must have a DatetimeIndex")
-    out = frame.copy().sort_index()
+    if frame.index.has_duplicates or not frame.index.is_monotonic_increasing:
+        raise ValueError(f"{name} timestamps must be unique and increasing")
+    out = frame.copy()
     idx = pd.DatetimeIndex(out.index)
     if idx.tz is None:
         idx = idx.tz_localize("UTC")
@@ -345,9 +366,7 @@ def _profile_levels(day_bars: pd.DataFrame, bins: int) -> dict[str, Any]:
 def _adverse_price(price: float, direction: str, entry: bool, cost: float = 0.0,
                    cost_pct: float = 0.0) -> float:
     """Apply a symmetric adverse execution cost in price units or percentage."""
-    is_buy = (direction == "LONG") if entry else (direction == "SHORT")
-    effective_cost = cost + (price * cost_pct)
-    return float(price + effective_cost if is_buy else price - effective_cost)
+    return ExecutionCosts(fixed_per_side=cost, commission_bps=cost_pct * 10000).adverse(price, direction, entry)
 
 
 def _daily_group_stats(trades: list[BacktestTrade], field: str) -> dict[str, dict[str, float]]:
@@ -398,10 +417,10 @@ def _make_report(symbol: str, bars_processed: int, trades: list[BacktestTrade],
         peak_r = max(peak_r, equity_r)
         max_dd_r = max(max_dd_r, peak_r - equity_r)
         peak_pct = max(peak_pct, equity_pct)
-        max_total_dd_pct = max(max_total_dd_pct, peak_pct - equity_pct)
+        max_total_dd_pct = max(max_total_dd_pct, 100.0 * (peak_pct - equity_pct) / peak_pct)
         daily_min_pct[day] = min(daily_min_pct.get(day, daily_start_pct[day]), equity_pct)
     max_daily_dd_pct = max(
-        (daily_start_pct[day] - daily_min_pct[day] for day in daily_start_pct),
+        (100.0 * (daily_start_pct[day] - daily_min_pct[day]) / daily_start_pct[day] for day in daily_start_pct),
         default=0.0,
     )
     count = len(values)
@@ -454,6 +473,10 @@ def run_backtest(
     session_hours_utc: tuple[int, int] | None = None,
     filter_low_volume_days: bool | None = None,
     min_daily_volume_ratio: float = 0.70,
+    costs: ExecutionCosts | None = None,
+    touch_bars: int = 3,
+    decision_observer=None,
+    candidate_observer=None,
 ) -> BacktestReport:
     """Simulate a single instrument without future-data leakage.
 
@@ -466,6 +489,14 @@ def run_backtest(
     is_btc = symbol.upper() in ("BTCUSDT", "BTC", "BTCUSD")
     effective_cost_pct = 0.0004 if (cost_pct is None and is_crypto) else (float(cost_pct) if cost_pct is not None else 0.0)
     effective_apply_funding = is_crypto if apply_funding is None else bool(apply_funding)
+    execution_costs = costs or ExecutionCosts(
+        fixed_per_side=float(spread_points) * float(point_size),
+        commission_bps=effective_cost_pct * 10000,
+        funding_rate_8h=0.0001 if effective_apply_funding else 0.0,
+        provenance="ASSUMED" if is_crypto or spread_points else "UNMEASURED",
+    )
+    effective_cost_pct = execution_costs.pct_per_side
+    effective_apply_funding = execution_costs.funding_rate_8h > 0
     effective_filter_low_volume = (instrument_profile.name == "CRYPTO_MOMENTUM") if filter_low_volume_days is None else bool(filter_low_volume_days)
     effective_session_hours = session_hours_utc if session_hours_utc is not None else instrument_profile.active_hours_utc
 
@@ -489,6 +520,8 @@ def run_backtest(
     if not np.isfinite(point_size) or point_size <= 0:
         raise ValueError("point_size must be finite and greater than zero")
     m1 = _utc_index(m1_bars, "M1 bars")
+    if m1_bars.attrs.get("volume_semantics") in ("UNAVAILABLE", "SYNTHETIC_RANGE_PROXY"):
+        raise ValueError("Observed volume is required; unavailable/proxy volume is not admissible")
     if len(m1) < 300:
         raise ValueError("At least 300 M1 bars are required for walk-forward simulation")
     trigger_bars = _resample_tf(m1, trigger_tf)
@@ -522,21 +555,7 @@ def run_backtest(
     low_volume_sessions: dict[str, bool] = {}
     if effective_filter_low_volume:
         session_vols = {s: float(m1.loc[m1["session"] == s, "tick_volume"].sum()) for s in session_names}
-        for pos in range(len(session_names)):
-            curr_name = session_names[pos]
-            try:
-                curr_dt = pd.Timestamp(curr_name)
-                is_weekend = curr_dt.dayofweek >= 5
-            except Exception:
-                is_weekend = False
-            past_vols = [session_vols[session_names[p]] for p in range(max(0, pos - 5), pos)]
-            if past_vols:
-                avg_vol = float(np.mean(past_vols))
-                prior_vol = past_vols[-1]
-                is_low_vol = prior_vol < (float(min_daily_volume_ratio) * avg_vol)
-            else:
-                is_low_vol = False
-            low_volume_sessions[curr_name] = is_weekend or is_low_vol
+        low_volume_sessions = low_volume_veto(session_names, session_vols, min_daily_volume_ratio)
 
     vwap_engine = VWAPEngine()
     # Vectorized cumulative VWAP is causal: each row depends only on that
@@ -544,10 +563,11 @@ def run_backtest(
     vwap_input = m1.copy()
     vwap_input["session"] = m1["session"]
     vwap_all = vwap_engine.calculate(vwap_input, session_key="session")
-    cost = float(spread_points) * float(point_size)
+    cost = execution_costs.fixed_per_side
     trades: list[BacktestTrade] = []
     position: _OpenTrade | None = None
     processed = 0
+    pending_entry = None
     funnel_counts = {
         "sessions_evaluated": len(prior_profiles),
         "bars_with_active_poi": 0,
@@ -560,13 +580,48 @@ def run_backtest(
         "rejected_low_volume_day": 0,
         "rejected_high_spread_to_sl": 0,
         "trades_opened": 0,
+        "rejected_fill_geometry": 0,
+        "rejected_stale_fill": 0,
     }
 
+    trigger_minutes = trigger_tf_minutes(trigger_tf)
     for i in range(len(m1)):
         timestamp = m1.index[i]
-        bar = m1.iloc[i]
         decision_time = timestamp + pd.Timedelta(minutes=1)
         processed += 1
+        # While flat, non-decision candles have no state transition. Avoid
+        # allocating mixed-type pandas rows for hundreds of thousands of them.
+        if position is None and pending_entry is None and decision_time.minute % trigger_minutes:
+            continue
+        bar = m1.iloc[i]
+
+        # Fill only at the next available M1 OPEN, after the signal is known.
+        # Do not carry a signal across data gaps/weekends as a free stale fill.
+        if pending_entry is not None and position is None:
+            signal_time, poi, decision, regime_name = pending_entry
+            pending_entry = None
+            if timestamp != signal_time + pd.Timedelta(minutes=1):
+                funnel_counts["rejected_stale_fill"] += 1
+            else:
+                entry = execution_costs.adverse(float(bar["open"]), poi.direction, True)
+                stop = float(decision.stop_loss)
+                tp1, tp2 = decision.take_profit_1, decision.take_profit_2 or decision.take_profit_1
+                valid = tp1 is not None and tp2 is not None
+                valid = valid and ((stop < entry < tp1 <= tp2) if poi.direction == "LONG" else (stop > entry > tp1 >= tp2))
+                if valid:
+                    position = _OpenTrade(
+                        symbol=symbol, direction=poi.direction, poi_type=poi.poi_type,
+                        regime=regime_name, entry_time=timestamp,
+                        entry_price=entry, initial_stop_loss=stop, stop_loss=stop,
+                        tp1=float(tp1 if tp1_close_pct > 0 else tp2), tp2=float(tp2),
+                        initial_risk=abs(entry-stop), tp1_close_pct=tp1_close_pct,
+                        be_offset_r=be_offset_r, funding_rate_8h=execution_costs.funding_rate_8h,
+                        entry_at_open=True, signal_bar_time=signal_time.isoformat(),
+                        decision_time=timestamp.isoformat(),
+                    )
+                    funnel_counts["trades_opened"] += 1
+                else:
+                    funnel_counts["rejected_fill_geometry"] += 1
 
         # Manage an existing trade first, using only this fully closed candle.
         if position is not None:
@@ -575,21 +630,20 @@ def run_backtest(
                 trades.append(closed_trade)
                 position = None
 
-        trigger_minutes = trigger_tf_minutes(trigger_tf)
         if trigger_minutes > 1 and decision_time.minute % trigger_minutes != 0:
             continue
         trigger_cutoff = decision_time - pd.Timedelta(minutes=trigger_minutes)
         trigger_idx = trigger_bars.index.searchsorted(trigger_cutoff, side="right")
         eligible_triggers = trigger_bars.iloc[:trigger_idx]
-        if eligible_triggers.empty or eligible_triggers.index[-1] + pd.Timedelta(minutes=trigger_minutes) > decision_time:
+        if len(eligible_triggers) < 30 or eligible_triggers.index[-1] + pd.Timedelta(minutes=trigger_minutes) > decision_time:
             continue
 
         # Keep diagnostics running while a trade is open, but block new entries.
         can_enter = position is None
         current_session = str(bar["session"])
-        if effective_filter_low_volume and low_volume_sessions.get(current_session, False):
+        day_veto = effective_filter_low_volume and low_volume_sessions.get(current_session, False)
+        if day_veto:
             funnel_counts["rejected_low_volume_day"] += 1
-            continue
         profile = prior_profiles.get(current_session)
         if profile is None:
             continue
@@ -609,18 +663,12 @@ def run_backtest(
             continue
         price = float(bar["close"])
         btc_reg = btc_regimes.get(timestamp) if btc_regimes is not None else None
-        regime_decision = generate_regime_pois(
-            macro_bias, profile, latest_vwap, price, atr,
-            allow_range=allow_range,
-            allow_mean_reversion=effective_allow_mean_reversion,
-            allow_trend_pullback=effective_allow_trend_pullback,
-            poi_atr_multiplier=instrument_profile.poi_atr_multiplier,
-            imbalance_vwap_poc_atr=instrument_profile.imbalance_vwap_poc_atr,
-            mean_reversion_confluence_atr=instrument_profile.mean_reversion_confluence_atr,
-            is_crypto=is_crypto,
-            is_btc=is_btc,
-            btc_leader_filter=bool(btc_regimes is not None),
-            btc_leader_regime=btc_reg,
+        regime_decision = decide_regime(
+            symbol, macro_bias, profile, latest_vwap, price, atr,
+            allow_range=allow_range, allow_mean_reversion=effective_allow_mean_reversion,
+            disable_trend_pullback=disable_trend_pullback,
+            btc_leader_filter=btc_regimes is not None, btc_leader_regime=btc_reg,
+            generator=generate_regime_pois,
         )
         if out_regimes is not None:
             out_regimes[timestamp] = regime_decision.regime.value
@@ -629,13 +677,10 @@ def run_backtest(
         bar_touched = bar_z = bar_volume = bar_rejection = bar_low_rr = False
         decisions = []
         for poi in regime_decision.pois:
-            decision = evaluate_trigger(
-                eligible_triggers.iloc[max(0, len(eligible_triggers) - 30):], poi.direction,
-                poi.poi_low, poi.poi_high, atr, poi.take_profits,
-                poi_type=poi.poi_type, center_price=poi.center, cost_price=cost,
-                sl_atr_buffer=instrument_profile.sl_atr_buffer,
-                min_spread_to_sl_ratio=instrument_profile.min_spread_to_sl_ratio,
-                session_hours_utc=effective_session_hours,
+            decision = decide_trigger(
+                symbol, eligible_triggers.tail(30), poi, atr,
+                execution_costs.price_cost(price), touch_bars=touch_bars,
+                session_hours=effective_session_hours, evaluator=evaluate_trigger,
             )
             metrics = decision.metrics
             if metrics.get("poi_touched"):
@@ -658,7 +703,13 @@ def run_backtest(
         funnel_counts["passed_volume"] += int(bar_touched and bar_z and bar_volume)
         funnel_counts["passed_rejection"] += int(bar_touched and bar_z and bar_volume and bar_rejection)
         funnel_counts["rejected_low_rr"] += int(bar_low_rr)
-        if not can_enter or i >= len(m1) - 1:
+        if decision_observer is not None:
+            decision_observer(decision_snapshot(symbol, timestamp, regime_decision, decisions,
+                                               veto="LOW_VOLUME_OR_WEEKEND" if day_veto else None))
+        if candidate_observer is not None:
+            for poi, decision in decisions:
+                candidate_observer(timestamp, poi, decision, atr, bool(day_veto))
+        if day_veto or not can_enter or i >= len(m1) - 1:
             continue
         for poi, decision in decisions:
             if not decision.execute:
@@ -667,29 +718,13 @@ def run_backtest(
                 btc_reg = btc_regimes.get(timestamp)
                 if not btc_leader_allows_direction(btc_reg, symbol, poi.direction):
                     continue
-            entry = _adverse_price(float(bar["close"]), poi.direction, True, cost, effective_cost_pct)
-            stop = float(decision.stop_loss)
-            risk = abs(entry - stop)
-            tp1 = decision.take_profit_1
-            tp2 = decision.take_profit_2 if decision.take_profit_2 is not None else tp1
-            if tp1 is None or tp2 is None or risk <= 0:
-                continue
-            # Entry is at this candle's close; its high/low cannot close the
-            # newly opened trade. Management starts on the next M1 candle.
-            position = _OpenTrade(
-                symbol=symbol, direction=poi.direction, poi_type=poi.poi_type,
-                regime=regime_decision.regime.value, entry_time=timestamp,
-                entry_price=entry, initial_stop_loss=stop, stop_loss=stop,
-                tp1=float(tp1 if tp1_close_pct > 0.0 else tp2), tp2=float(tp2),
-                initial_risk=risk, tp1_close_pct=tp1_close_pct, be_offset_r=be_offset_r,
-            )
-            funnel_counts["trades_opened"] += 1
+            pending_entry = (timestamp, poi, decision, regime_decision.regime.value)
             break
 
     # Mark any still-open position at the final closed close, conservatively
     # without assuming future targets are hit.
     if position is not None:
-        final_time = m1.index[-1]
+        final_time = m1.index[-1] + pd.Timedelta(minutes=1)
         final_close = _adverse_price(float(m1.iloc[-1]["close"]), position.direction, False, cost, effective_cost_pct)
         remaining_fraction = (1.0 - position.tp1_close_pct) if position.tp1_taken else 1.0
         position.r_multiple += remaining_fraction * (
@@ -698,19 +733,20 @@ def run_backtest(
         ) / position.initial_risk
         if effective_apply_funding:
             _apply_funding(position, final_time)
-        trades.append(BacktestTrade(
-            position.symbol, position.direction, position.poi_type, position.regime,
-            position.entry_time.isoformat(), final_time.isoformat(),
-            position.entry_price, position.initial_stop_loss, position.tp1, position.tp2,
-            "END_OF_DATA", float(position.r_multiple), position.tp1_taken,
-            position.funding_events, float(position.funding_cost_r),
-        ))
+        trades.append(_trade_record(position, final_time, "END_OF_DATA"))
 
-    return _make_report(
+    report = _make_report(
         symbol, processed, trades, spread_points, point_size, funnel_counts,
-        instrument_profile=instrument_profile.name,
-        trigger_tf=trigger_tf,
+        instrument_profile=instrument_profile.name, trigger_tf=trigger_tf,
     )
+    return replace(report, measurement={
+        "contract": "measurement-v2", "fill_policy": "NEXT_M1_OPEN_NO_GAPS",
+        "costs": asdict(execution_costs), "cost_evidence": execution_costs.provenance,
+        "volume_semantics": m1_bars.attrs.get("volume_semantics", "UNVERIFIED_INPUT"),
+        "macro_evidence": "EXPLICIT_PRICE_REGIME" if macro_bias == "auto" else "FIXED_HYPOTHESIS_NOT_VINTAGE",
+        "live_execution": False, "edge_proven": False,
+        "closed_trades_excluding_end_of_data": sum(t.exit_reason != "END_OF_DATA" for t in trades),
+    })
 
 
 def _synthetic_bars(count: int, end_time: pd.Timestamp | None = None) -> pd.DataFrame:
@@ -887,6 +923,8 @@ def main(argv: list[str] | None = None) -> int:
     source = ("binance" if str(args.symbol).upper().endswith("USDT") else "mt5") if args.source == "auto" else args.source
     symbol = normalize_binance_symbol(args.symbol) if source == "binance" else args.symbol
     point_size = args.point_size if args.point_size is not None else (0.01 if source == "binance" else _default_point_size(symbol))
+    if not args.dry_run and args.macro_bias is None:
+        parser.error("Historical replay requires --macro-bias auto or an explicit fixed hypothesis; a current macro gate is not vintage evidence")
     if args.dry_run:
         m1 = _synthetic_bars(args.bars)
         m15 = _resample_m15(m1)
@@ -913,7 +951,8 @@ def main(argv: list[str] | None = None) -> int:
         now = pd.Timestamp.now(tz="UTC")
         m1 = filter_closed_bars(m1, "M1", now=now)
         m15 = filter_closed_bars(m15, "M15", now=now)
-    effective_spread = max(args.spread_points, float(m1["close"].iloc[-1]) * 0.0004 / point_size) if source == "binance" else args.spread_points
+    # Percentage fees are already applied dynamically by run_backtest.
+    effective_spread = args.spread_points
     report = run_backtest(
         m1, symbol=symbol, macro_bias=bias, m15_bars=m15,
         profile_bins=args.profile_bins, spread_points=effective_spread,

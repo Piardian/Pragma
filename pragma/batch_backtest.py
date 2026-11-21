@@ -35,6 +35,8 @@ HORIZONS = {
 def run_single(symbol: str, bars_count: int, ignore_macro: bool = True) -> dict[str, Any]:
     point_size = _default_point_size(symbol)
     try:
+        if not ignore_macro:
+            raise ValueError("MACRO_VINTAGE_UNAVAILABLE: current gate is not historical evidence")
         with MT5DataClient() as client:
             # Check if symbol exists in MT5
             available = set(client.symbols())
@@ -54,7 +56,7 @@ def run_single(symbol: str, bars_count: int, ignore_macro: bool = True) -> dict[
             return {"status": "ERROR", "error": f"Insufficient bars ({len(m1)})"}
 
         if ignore_macro:
-            bias = None
+            bias = "auto"
             allow_range = True
         else:
             gate = MacroGate().get_bias(symbol)
@@ -79,7 +81,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Batch walk-forward backtest runner")
     parser.add_argument("--symbols", nargs="+", default=DEFAULT_SYMBOLS)
     parser.add_argument("--horizons", nargs="+", default=["1_hafta", "1_ay", "3_ay"])
-    parser.add_argument("--output", default="backtest_batch_results.json")
+    parser.add_argument("--output", default="reports/backtest_batch_measurement_v2.json")
     parser.add_argument("--with-macro", action="store_true", help="Use macro gate instead of regime-driven mode")
     args = parser.parse_args()
 

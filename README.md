@@ -27,6 +27,14 @@ MT5 OHLC bars provide tick volume, not centralized traded volume for OTC FX/CFD 
 
 This is a research foundation, not a validated profitable strategy. No live order execution is implemented in these phases.
 
+## Measurement v2 audit and research
+
+See [measurement v2 usage](reports/MEASUREMENT_V2_USAGE.md) for the shared
+observer/replay contract, corrected next-open fills, explicit cost provenance,
+and frozen experiments. Legacy HistData proxy-volume and current-macro
+historical results are not admissible edge evidence. The existing shadow
+account remains separate from the new measurement artifacts.
+
 
 ## Begonya macro gate integration
 

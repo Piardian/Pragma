@@ -1,0 +1,58 @@
+{
+  "preserved_without_overwrite": true,
+  "results": [
+    {
+      "path": "backtest_1year_results.json",
+      "sha256": "672f1c9c9b0532470751f1d4687f62ef8ca676711493a5ef2547f4eb37c05e9b",
+      "edge_evidence_admissible": false,
+      "reasons": [
+        "Synthetic range-derived volume",
+        "HistData EST labelled UTC",
+        "Zero spread FX/gold",
+        "Current macro gate reused historically",
+        "No code provenance"
+      ]
+    },
+    {
+      "path": "backtest_batch_results.json",
+      "sha256": "1e7ef5dcf5b14ba63bc2ad31c0a15503a18e293606e8cd9f3366958a1ff88046",
+      "edge_evidence_admissible": false,
+      "reasons": [
+        "Zero spread FX/gold",
+        "Legacy decision/fill contract",
+        "No code provenance"
+      ]
+    },
+    {
+      "path": "backtest_macro_results.json",
+      "sha256": "12a6bcae53e902d54be1025c7604eaae327cbf33fcb20c4c980125fc0d4d33b3",
+      "edge_evidence_admissible": false,
+      "reasons": [
+        "Current macro gate reused historically",
+        "Zero spread FX/gold",
+        "No code provenance"
+      ]
+    },
+    {
+      "path": "backtest_macro_3m_results.json",
+      "sha256": "cdc8ffc28d90885bf122b8997d28f95fa9dd8cd271f9c9b517f9e815355e8452",
+      "edge_evidence_admissible": false,
+      "reasons": [
+        "Current macro gate reused historically",
+        "Zero spread FX/gold",
+        "No code provenance"
+      ]
+    },
+    {
+      "path": "artifacts/phase13_stress_test.json",
+      "sha256": "6dbebd9faf646ec39487a95e60ce835091d95769ee8ad9959126855a68a42ba5",
+      "edge_evidence_admissible": false,
+      "reasons": [
+        "Legacy decision contract not equal to forward path",
+        "Assumed costs/funding",
+        "Exploratory reused history",
+        "No calibrated fill evidence"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "observed_at_utc": "2026-10-23T20:34:18.208220+00:00",
+  "purpose": "Snapshot of evidence inspected; not a frozen executable experiment or historical code provenance",
+  "files": [
+    {
+      "path": "C:\\Users\\piard\\Desktop\\PragmaProject\\backtest_1year_results.json",
+      "sha256": "672f1c9c9b0532470751f1d4687f62ef8ca676711493a5ef2547f4eb37c05e9b",
+      "bytes": 51921
+    },
+    {
+      "path": "C:\\Users\\piard\\Desktop\\PragmaProject\\backtest_batch_results.json",
+      "sha256": "1e7ef5dcf5b14ba63bc2ad31c0a15503a18e293606e8cd9f3366958a1ff88046",
+      "bytes": 87150
+    },
+    {
+      "path": "C:\\Users\\piard\\Desktop\\PragmaProject\\artifacts\\phase13_stress_test.json",
+      "sha256": "6dbebd9faf646ec39487a95e60ce835091d95769ee8ad9959126855a68a42ba5",
+      "bytes": 22842
+    },
+    {
+      "path": "C:\\Users\\piard\\Desktop\\PragmaProject\\pragma\\one_year_backtest.py",
+      "sha256": "cd461807c4b436769fb13ce35324fa0fa7b5bcdeef8d39e99872e7111c2f6cc8",
+      "bytes": 6390
+    },
+    {
+      "path": "C:\\Users\\piard\\Desktop\\PragmaProject\\pragma\\backtest_engine.py",
+      "sha256": "c8582b736dc7b77a165fa72aee4e26971affa1e3b927d900ecfa3e43a6e50de3",
+      "bytes": 45886
+    },
+    {
+      "path": "C:\\Users\\piard\\Desktop\\PragmaProject\\pragma\\run_pipeline.py",
+      "sha256": "59c7250c948c308b35af7de7543f7a6c2ee472aedd7f0323849f30d598ebbbbf",
+      "bytes": 33979
+    },
+    {
+      "path": "C:\\Users\\piard\\Desktop\\PragmaProject\\pragma\\shadow_trader.py",
+      "sha256": "8fb4ebe8ba41df11a2bfdc73734f3fd598bfed5e465d9783288197699fc7ab77",
+      "bytes": 31664
+    },
+    {
+      "path": "C:\\Users\\piard\\Desktop\\PragmaProject\\pragma\\trigger_engine.py",
+      "sha256": "2b61c09733fa551d19efe69536393834d1820c9ffbfaa2e186c6dc4024945354",
+      "bytes": 15422
+    },
+    {
+      "path": "C:\\Users\\piard\\Desktop\\PragmaProject\\pragma\\instrument_profiles.py",
+      "sha256": "6bf1aac9d2a6c83ec12d40abbe0ad82efbf90f2e5dfb17e5b6dad76f68be5750",
+      "bytes": 5458
+    },
+    {
+      "path": "C:\\Users\\piard\\AppData\\Local\\Pragma\\shadow_trading\\trade_journal.csv",
+      "sha256": "a570eb93c002ec362b68379256e0609a173bd910256c900b1176b9a93b62572c",
+      "bytes": 1434
+    },
+    {
+      "path": "C:\\Users\\piard\\AppData\\Local\\Pragma\\shadow_trading\\state.json",
+      "sha256": "500d803a7e2c579744348372ba7b41092bda5953bfead82e242b0c650e0e1b3d",
+      "bytes": 28230
+    }
+  ]
+}

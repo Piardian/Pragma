@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+from pathlib import Path
 import threading
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -146,6 +148,54 @@ class ExecutionNotifier:
         poi_type = _value(poi, "poi_type", "UNKNOWN")
         if not self.deduplicator.claim(symbol, poi_type, bar_time):
             return {"sent": False, "reason": "DUPLICATE"}
+        # --- Persist Live Executable Signal for Megalord Multi-Engine Orchestrator ---
+        try:
+            from datetime import datetime, timezone
+            reports_dir = Path(__file__).resolve().parent.parent / "reports"
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            live_signals_file = reports_dir / "live_signals.json"
+
+            existing = []
+            if live_signals_file.exists():
+                try:
+                    existing = json.loads(live_signals_file.read_text(encoding="utf-8"))
+                except Exception:
+                    existing = []
+
+            entry_p = float(_value(decision, "entry_price", 0.0))
+            sl_p = float(_value(decision, "stop_loss", 0.0))
+            tp1_p = float(_value(decision, "take_profit_1", _value(decision, "take_profit", 0.0)))
+            tp2_p = float(_value(decision, "take_profit_2", tp1_p))
+            rr_val = float(_value(decision, "rr_ratio", 2.0))
+            dir_val = _value(decision, "direction", _value(poi, "direction", "LONG"))
+            now_iso = datetime.now(timezone.utc).isoformat()
+            btime_str = bar_time.isoformat() if hasattr(bar_time, "isoformat") else str(bar_time)
+
+            sig_payload = {
+                "signal_id": f"PRG_{symbol}_{int(datetime.now(timezone.utc).timestamp())}",
+                "symbol": symbol,
+                "poi_type": poi_type,
+                "direction": dir_val,
+                "regime": getattr(regime, "value", str(regime)),
+                "entry_price": entry_p,
+                "stop_loss": sl_p,
+                "tp1": tp1_p,
+                "tp2": tp2_p,
+                "rr_ratio": rr_val,
+                "bar_time": btime_str,
+                "created_at": now_iso,
+                "status": "OPEN",
+            }
+            existing.append(sig_payload)
+            if len(existing) > 100:
+                existing = existing[-100:]
+            tmp_file = live_signals_file.with_suffix(".tmp")
+            tmp_file.write_text(json.dumps(existing, indent=2, default=str), encoding="utf-8")
+            os.replace(tmp_file, live_signals_file)
+            logger.info("Persisted live signal for Megalord: %s %s @ %.5f", symbol, dir_val, entry_p)
+        except Exception as exc:
+            logger.warning("Could not persist live signal: %s", exc)
+
         message = format_signal_message(symbol, poi, decision, regime, bar_time)
         if not self.bot_token or not self.chat_id:
             logger.info("%s", message)

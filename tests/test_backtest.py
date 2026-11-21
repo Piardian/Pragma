@@ -173,7 +173,7 @@ class OptimizationAndLeaderFilterTests(unittest.TestCase):
         ), patch.object(
             be, "evaluate_trigger",
             return_value=SimpleNamespace(
-                execute=True, stop_loss=95.0, take_profit_1=110.0, take_profit_2=115.0,
+                execute=True, stop_loss=2200.0, take_profit_1=2600.0, take_profit_2=2700.0,
                 metrics={"poi_touched": True, "z_condition": True, "volume_climax": True, "rejection": True},
                 reason=None,
             ),

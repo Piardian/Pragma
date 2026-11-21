@@ -70,6 +70,7 @@ class PaperTradingBook:
         self.risk_pct = float(risk_pct)
         self.enable_runner = bool(enable_runner)
         self.notifier = notifier or ExecutionNotifier()
+        self._symbol_cooldowns: dict[str, Any] = {}
         self.state: dict[str, Any] = {
             "version": 1,
             "initial_balance": float(initial_balance),
@@ -332,9 +333,54 @@ class PaperTradingBook:
             if direction == "SHORT" and not (stop > entry > tp1 >= tp2):
                 continue
 
+            planned_rr = float(signal.get("rr_ratio") or 0.0)
+
+            # Asya Seansı Kalkanı: 00:00 - 09:00 TSİ (UTC 21:00 - 06:00) yeni işlem yasağı
+            try:
+                stamp_dt = pd.to_datetime(stamp)
+                tsi_hour = (stamp_dt.hour + 3) % 24
+                if 0 <= tsi_hour < 9:
+                    record_info = {
+                        "timestamp": stamp, "symbol": symbol, "direction": direction,
+                        "poi_type": str(signal.get("poi_type", "")), "regime": str(signal.get("regime", "")),
+                        "macro_bias": signal.get("macro_bias", ""), "reason": "ASIAN_SESSION_SHIELD_ACTIVE",
+                        "entry_price": entry, "stop_loss": stop, "take_profit_1": tp1,
+                        "rr_ratio": planned_rr, "z_score": "", "volume_multiplier": "",
+                        "order_flow_delta": "", "atr": "",
+                    }
+                    try:
+                        record_rejected_signal(self.rejected_path, record_info)
+                    except Exception:
+                        pass
+                    continue
+            except Exception:
+                pass
+
+            # Sembol Soğuma Kalkanı: Aynı sembole 3 saat (180 dk) peş peşe giriş yasağı
+            sym_key = symbol.upper()
+            if sym_key in self._symbol_cooldowns:
+                last_cd = self._symbol_cooldowns[sym_key]
+                try:
+                    cur_dt = pd.to_datetime(stamp)
+                    if (cur_dt - last_cd).total_seconds() < 3 * 3600:
+                        record_info = {
+                            "timestamp": stamp, "symbol": symbol, "direction": direction,
+                            "poi_type": str(signal.get("poi_type", "")), "regime": str(signal.get("regime", "")),
+                            "macro_bias": signal.get("macro_bias", ""), "reason": "SYMBOL_COOLDOWN_ACTIVE",
+                            "entry_price": entry, "stop_loss": stop, "take_profit_1": tp1,
+                            "rr_ratio": planned_rr, "z_score": "", "volume_multiplier": "",
+                            "order_flow_delta": "", "atr": "",
+                        }
+                        try:
+                            record_rejected_signal(self.rejected_path, record_info)
+                        except Exception:
+                            pass
+                        continue
+                except Exception:
+                    pass
+
             # Minimum 1:2 R:R Gate: Trade must offer at least 2.0R to main target
             rr_tp2 = abs(tp2 - entry) / risk_distance if risk_distance > 0 else 0.0
-            planned_rr = float(signal.get("rr_ratio") or 0.0)
             if max(rr_tp2, planned_rr) < 2.0:
                 record_info = {
                     "timestamp": stamp, "symbol": symbol, "direction": direction,
@@ -372,11 +418,13 @@ class PaperTradingBook:
                 except (ValueError, TypeError):
                     pass
 
-            # TP1 Tavan Sınırlaması: Cap TP1 at max 2.0R so partial profit can be reliably banked
+            # 1R'de %50 Kâr Al + Breakeven: TP1 kesinlikle 1.0R seviyesine kilitlenir
             sign = 1.0 if direction == "LONG" else -1.0
-            rr_tp1_dist = abs(tp1 - entry) / risk_distance
-            if rr_tp1_dist > 2.0:
-                tp1 = entry + sign * 2.0 * risk_distance
+            tp1 = entry + sign * 1.0 * risk_distance
+            if abs(tp2 - entry) / risk_distance < 2.0:
+                tp2 = entry + sign * 2.0 * risk_distance
+
+            self._symbol_cooldowns[sym_key] = pd.to_datetime(stamp)
 
             risk_cash = float(self.state["balance"]) * self.risk_pct / 100.0
             trade_id = hashlib.sha256(signal_key.encode("utf-8")).hexdigest()[:16]

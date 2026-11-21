@@ -46,6 +46,10 @@ from datetime import datetime, timezone, timedelta
 
 import glob
 
+import hashlib
+
+import hmac
+
 import json
 
 import logging
@@ -54,11 +58,15 @@ import os
 
 from pathlib import Path
 
+import re
+
 import sys
 
 import time
 
 from typing import Any
+
+import urllib.error
 
 import urllib.parse
 
@@ -200,6 +208,132 @@ def send_telegram(text: str, bot_token: str | None = None, chat_id: str | None =
     except Exception as exc:
         logger.error("Failed to deliver Telegram watchdog message: %s", exc)
         return False
+
+
+def _read_env_values(env_path: Path) -> dict[str, str]:
+    """Read key=value pairs from a .env file without mutating os.environ."""
+    values: dict[str, str] = {}
+    if not env_path.exists():
+        return values
+    try:
+        for raw_line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            val = val.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+                val = val[1:-1]
+            values[key] = val
+    except Exception:
+        pass
+    return values
+
+
+def get_public_ip(timeout: float = 3.0) -> str | None:
+    """Resolve current public egress IP address cleanly."""
+    for url in ("https://api.ipify.org?format=json", "https://ifconfig.me/ip"):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "PragmaWatchdog/1.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", errors="replace").strip()
+                if url.endswith("json"):
+                    ip = str(json.loads(raw).get("ip", "")).strip()
+                else:
+                    ip = raw
+                if ip:
+                    return ip
+        except Exception:
+            continue
+    return None
+
+
+def check_begonya_binance_ip_status(begonya_dir: Path | None = None, timeout: float = 4.0) -> dict[str, Any]:
+    """Check whether Begonya00's Binance Futures API key + IP whitelist is accepted."""
+    root = Path(begonya_dir) if begonya_dir is not None else (Path.home() / "Desktop" / "Begonya00")
+    env_vals = _read_env_values(root / ".env")
+    api_key = env_vals.get("BINANCE_API_KEY", "").strip()
+    api_secret = env_vals.get("BINANCE_API_SECRET", "").strip()
+    testnet = env_vals.get("BINANCE_TESTNET", "false").strip().lower() == "true"
+    base_url = "https://testnet.binancefuture.com" if testnet else "https://fapi.binance.com"
+
+    if not api_key or not api_secret:
+        return {
+            "status": "MISSING_KEYS",
+            "needs_ip_update": False,
+            "ip": get_public_ip(timeout=min(2.0, timeout)),
+            "code": None,
+            "detail": "Begonya00 .env içinde Binance API anahtarı yok",
+        }
+
+    ts_ms = int(time.time() * 1000)
+    try:
+        t_req = urllib.request.Request(f"{base_url}/fapi/v1/time", headers={"User-Agent": "PragmaWatchdog/1.0"})
+        with urllib.request.urlopen(t_req, timeout=min(2.5, timeout)) as t_resp:
+            t_data = json.loads(t_resp.read().decode("utf-8"))
+            if "serverTime" in t_data:
+                ts_ms = int(t_data["serverTime"])
+    except Exception:
+        pass
+
+    query = f"timestamp={ts_ms}&recvWindow=10000"
+    sig = hmac.new(api_secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
+    req = urllib.request.Request(
+        f"{base_url}/fapi/v2/balance?{query}&signature={sig}",
+        headers={"X-MBX-APIKEY": api_key, "User-Agent": "PragmaWatchdog/1.0"},
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            json.loads(resp.read().decode("utf-8"))
+            return {
+                "status": "OK",
+                "needs_ip_update": False,
+                "ip": get_public_ip(timeout=min(2.0, timeout)),
+                "code": 0,
+                "detail": "Binance Futures API ve IP uyumlu",
+            }
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        code = None
+        msg = body or str(exc)
+        try:
+            parsed = json.loads(body)
+            code = parsed.get("code")
+            msg = str(parsed.get("msg", msg))
+        except Exception:
+            pass
+        m = re.search(r"request ip:\s*([0-9a-fA-F\.:]+)", msg)
+        req_ip = m.group(1) if m else get_public_ip(timeout=min(2.0, timeout))
+        if code == -2015:
+            return {
+                "status": "IP_CHANGE_REQUIRED",
+                "needs_ip_update": True,
+                "ip": req_ip,
+                "code": -2015,
+                "detail": f"Binance -2015 reddi (request ip: {req_ip or 'bilinmiyor'})",
+            }
+        return {
+            "status": "ERROR",
+            "needs_ip_update": False,
+            "ip": req_ip,
+            "code": code,
+            "detail": f"HTTP {exc.code}: {msg[:100]}",
+        }
+    except Exception as exc:
+        return {
+            "status": "ERROR",
+            "needs_ip_update": False,
+            "ip": get_public_ip(timeout=min(2.0, timeout)),
+            "code": None,
+            "detail": f"Bağlantı hatası: {str(exc)[:100]}",
+        }
 
 
 
@@ -664,7 +798,11 @@ def evaluate_target(key: str, cfg: dict[str, Any], now: float) -> dict[str, Any]
 
 
 
-def format_heartbeat_report(evaluations: list[dict[str, Any]], now_dt: datetime) -> str:
+def format_heartbeat_report(
+    evaluations: list[dict[str, Any]],
+    now_dt: datetime,
+    begonya_ip_status: dict[str, Any] | None = None,
+) -> str:
 
     """Format an informative, compact Telegram Heartbeat report."""
 
@@ -752,7 +890,14 @@ def format_heartbeat_report(evaluations: list[dict[str, Any]], now_dt: datetime)
 
         lines.append(f"⚠️ Genel Durum: {total_count - healthy_count} sistemde aksaklık var!")
 
-
+    if begonya_ip_status is not None:
+        ip_str = begonya_ip_status.get("ip") or "Bilinmiyor"
+        if begonya_ip_status.get("status") == "OK":
+            lines.append(f"🌐 Begonya00 Binance IP: Değişim gerekmiyor (Güncel IP: {ip_str} | API Uyumlu)")
+        elif begonya_ip_status.get("needs_ip_update"):
+            lines.append(f"🔴 Begonya00 Binance IP: DEĞİŞİM GEREKİYOR! (Yeni IP: {ip_str} | Binance -2015 reddi)")
+        else:
+            lines.append(f"🟠 Begonya00 Binance IP: {begonya_ip_status.get('status', 'HATA')} (IP: {ip_str} | {begonya_ip_status.get('detail', '')})")
 
     return "\n".join(lines)
 
@@ -976,17 +1121,50 @@ class WatchdogRunner:
 
 
 
-        # Scheduled Heartbeat check
-
+        # Scheduled Heartbeat & Begonya Binance IP check
+        ip_status: dict[str, Any] | None = None
         last_hb = float(self.state.get("last_heartbeat", 0.0))
-
         hb_interval = self.heartbeat_hours * 3600.0
+        hb_due = force_heartbeat or (now - last_hb >= hb_interval)
 
+        if "begonya00" in self.targets:
+            last_ip_check = float(self.state.get("last_begonya_ip_check", 0.0))
+            if hb_due or (now - last_ip_check >= 300.0):
+                ip_status = check_begonya_binance_ip_status()
+                self.state["last_begonya_ip_check"] = now
+                self.state["begonya_ip_status"] = ip_status
+                prev_ip_state = target_states.get("begonya_binance_ip", "OK")
+                if ip_status.get("needs_ip_update"):
+                    last_ip_alert = float(alert_history.get("begonya_binance_ip", 0.0))
+                    if prev_ip_state != "IP_CHANGE_REQUIRED" or (now - last_ip_alert) > 7200:
+                        ip_msg = (
+                            "🚨 PRAGMA WATCHDOG — BEGONYA00 IP DEĞİŞİMİ GEREKLİ\n"
+                            f"Yeni IP: {ip_status.get('ip') or 'Bilinmiyor'}\n"
+                            f"Detay: {ip_status.get('detail', '')}\n"
+                            f"Zaman: {now_dt.strftime('%H:%M:%S UTC')}\n"
+                            "Binance API Management üzerinden güncel IP'yi tanımlayın."
+                        )
+                        if not self.dry_run:
+                            send_telegram(ip_msg, self.bot_token, self.chat_id)
+                        alert_history["begonya_binance_ip"] = now
+                    target_states["begonya_binance_ip"] = "IP_CHANGE_REQUIRED"
+                elif ip_status.get("status") == "OK":
+                    if prev_ip_state == "IP_CHANGE_REQUIRED":
+                        ok_msg = (
+                            "✅ PRAGMA WATCHDOG — BEGONYA00 IP DÜZELDİ\n"
+                            f"Güncel IP: {ip_status.get('ip') or 'Bilinmiyor'} (Binance API Uyumlu)\n"
+                            f"Zaman: {now_dt.strftime('%H:%M:%S UTC')}"
+                        )
+                        if not self.dry_run:
+                            send_telegram(ok_msg, self.bot_token, self.chat_id)
+                    target_states["begonya_binance_ip"] = "OK"
 
+        if hb_due:
 
-        if force_heartbeat or (now - last_hb >= hb_interval):
+            if ip_status is None and "begonya00" in self.targets:
+                ip_status = self.state.get("begonya_ip_status") or check_begonya_binance_ip_status()
 
-            hb_text = format_heartbeat_report(evaluations, now_dt)
+            hb_text = format_heartbeat_report(evaluations, now_dt, begonya_ip_status=ip_status)
 
             if not self.dry_run:
 
@@ -1088,7 +1266,13 @@ def main() -> None:
 
         evals = runner.run_cycle(force_heartbeat=False)
 
-        report = format_heartbeat_report(evals, datetime.now(timezone.utc))
+        ip_st = runner.state.get("begonya_ip_status") if "begonya00" in runner.targets else None
+
+        if ip_st is None and "begonya00" in runner.targets:
+
+            ip_st = check_begonya_binance_ip_status()
+
+        report = format_heartbeat_report(evals, datetime.now(timezone.utc), begonya_ip_status=ip_st)
 
         safe_print(report)
 

@@ -14,3 +14,12 @@ reports/**/frozen/
 reports/**/market_cache/
 reports/**/observer_*.log
 reports/**/ticks/
+
+*.log
+*.lock
+test-output/
+benchmark/*.jsonl
+reports/*/*.jsonl
+reports/*/*.json
+reports/watchdog_state.json
+reports/live_signals.json

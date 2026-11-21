@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 import os
 from pathlib import Path
@@ -13,7 +13,6 @@ import zipfile
 
 import numpy as np
 import pandas as pd
-from histdata import download_hist_data
 
 from pragma.backtest_engine import _default_point_size, run_backtest
 from pragma.macro_gate import MacroGate
@@ -26,13 +25,37 @@ DEFAULT_PAIRS = [
 ]
 
 
+def parse_histdata_m1(stream) -> pd.DataFrame:
+    """HistData ASCII is fixed EST (UTC-5); its M1 volume is usually zero.
+
+    Keep missing volume missing. A range-derived proxy would test a different
+    strategy. Refuse to pass it to a volume-dependent strategy as real volume.
+    """
+    frame = pd.read_csv(stream, sep=";", header=None,
+                        names=["time", "open", "high", "low", "close", "tick_volume"])
+    times = pd.to_datetime(frame.pop("time"), format="%Y%m%d %H%M%S")
+    frame.index = pd.DatetimeIndex(times).tz_localize(timezone(timedelta(hours=-5))).tz_convert("UTC")
+    frame = frame.sort_index()
+    frame.attrs.update(source="histdata", source_timezone="EST_FIXED_UTC_MINUS_5",
+                       volume_semantics="UNAVAILABLE", measurement_schema=2)
+    return frame
+
+
+def require_observed_volume(frame):
+    if frame.attrs.get("volume_semantics") not in ("BROKER_TICK_COUNT", "EXCHANGE_BASE_VOLUME"):
+        raise ValueError("VOLUME_UNAVAILABLE: HistData M1 cannot validate Pragma's volume-dependent strategy; use observed broker tick volume or exchange volume. Legacy proxy parquet is not admissible.")
+
+
 def fetch_or_load_year_m1(pair: str, year: str = "2025", cache_dir: Path | None = None) -> pd.DataFrame:
     cache = cache_dir or (Path(__file__).resolve().parent.parent / "historical_data")
     cache.mkdir(parents=True, exist_ok=True)
     parquet_path = cache / f"{pair.upper()}_{year}_M1.parquet"
     if parquet_path.exists():
-        return pd.read_parquet(parquet_path)
+        frame = pd.read_parquet(parquet_path)
+        require_observed_volume(frame)
+        return frame
 
+    from histdata import download_hist_data
     zip_path = download_hist_data(
         year=year, month=None, pair=pair.lower(),
         time_frame="M1", platform="ASCII", output_directory=str(cache),
@@ -40,13 +63,8 @@ def fetch_or_load_year_m1(pair: str, year: str = "2025", cache_dir: Path | None 
     with zipfile.ZipFile(zip_path, "r") as z:
         csv_file = [n for n in z.namelist() if n.endswith(".csv")][0]
         with z.open(csv_file) as f:
-            df = pd.read_csv(f, sep=";", header=None, names=["time", "open", "high", "low", "close", "vol"])
-            df["time"] = pd.to_datetime(df["time"], format="%Y%m%d %H%M%S", utc=True)
-            df = df.set_index("time").sort_index()
-            point_size = _default_point_size(pair)
-            df["tick_volume"] = np.maximum(1.0, ((df["high"] - df["low"]) / point_size).round())
-            df = df[["open", "high", "low", "close", "tick_volume"]]
-            df.to_parquet(parquet_path)
+            df = parse_histdata_m1(f)
+            require_observed_volume(df)
     # Cleanup downloaded zip to save disk space
     if Path(zip_path).exists():
         try:
@@ -58,6 +76,8 @@ def fetch_or_load_year_m1(pair: str, year: str = "2025", cache_dir: Path | None 
 
 def run_one_year(pair: str, year: str = "2025", with_macro: bool = False, cache_dir: Path | None = None) -> dict[str, Any]:
     try:
+        if with_macro:
+            raise ValueError("MACRO_VINTAGE_UNAVAILABLE: a current gate must not be applied to historical bars")
         df = fetch_or_load_year_m1(pair, year=year, cache_dir=cache_dir)
         point_size = _default_point_size(pair)
         if with_macro:
@@ -65,7 +85,7 @@ def run_one_year(pair: str, year: str = "2025", with_macro: bool = False, cache_
             bias = int(gate.bias)
             allow_range = getattr(gate, "gate", None) == "NEUTRAL_RANGE"
         else:
-            bias = None
+            bias = "auto"
             allow_range = True
 
         report = run_backtest(
@@ -86,7 +106,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="1-Year Walk-Forward Backtest across HistData archives")
     parser.add_argument("--pairs", nargs="+", default=DEFAULT_PAIRS)
     parser.add_argument("--year", default="2025")
-    parser.add_argument("--output", default="backtest_1year_results.json")
+    parser.add_argument("--output", default="reports/backtest_1year_measurement_v2.json")
     args = parser.parse_args()
 
     cache_dir = Path(__file__).resolve().parent.parent / "historical_data"

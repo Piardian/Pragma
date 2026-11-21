@@ -1,0 +1,12 @@
+{
+  "frozen_hash_mismatches": [],
+  "post_run_changed_files": [
+    "pragma\\run_pipeline.py",
+    "pragma\\shadow_trader.py"
+  ],
+  "post_run_change_reason": "Observer computation and disk errors are isolated from legacy behavior; decision and execution research core unchanged",
+  "unittest_passed": 153,
+  "completed_before_observer_isolation_patch": true,
+  "edge_proven": false,
+  "all_baseline_entries_pointwise_equal": 108
+}

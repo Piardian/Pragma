@@ -120,6 +120,9 @@ def _normalize_symbol(symbol: str) -> str:
     aliases = {
         "XAU": "XAUUSD", "GOLD": "XAUUSD", "GCF": "XAUUSD",
         "BTC": "BTCUSD", "BTCUSD": "BTCUSD", "BTCUSDT": "BTCUSD",
+        "ETH": "ETHUSD", "ETHUSD": "ETHUSD", "ETHUSDT": "ETHUSD",
+        "SOL": "SOLUSD", "SOLUSD": "SOLUSD", "SOLUSDT": "SOLUSD",
+        "LINK": "LINKUSD", "LINKUSD": "LINKUSD", "LINKUSDT": "LINKUSD",
         "EUR": "EURUSD", "EURUSD": "EURUSD",
         "XAUUSD": "XAUUSD",
     }
